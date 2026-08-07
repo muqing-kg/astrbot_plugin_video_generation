@@ -1,0 +1,7 @@
+name: astrbot_plugin_video_generation
+display_name: Grok 生视频
+desc: 面向 AstrBot 的 Grok 视频生成插件，支持文生视频、图生视频，自动识别秒数与比例，对接 grok2api
+version: v0.1.1
+author: muqing-kg
+repo: https://github.com/muqing-kg/astrbot_plugin_video_generation
+astrbot_version: ">=4.25.3"

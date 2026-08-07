@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.recallloom/
+.serena/
+_recallloom_prepare/
+main.py.bak_*
+*.zip

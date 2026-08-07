@@ -1,0 +1,340 @@
+{
+ "provider": {
+  "description": "Grok 接口配置",
+  "hint": "仅适配 grok2api。填写 grok2api 地址、客户端密钥和 Grok 视频模型。",
+  "type": "object",
+  "items": {
+   "base_url": {
+    "description": "API 地址",
+    "hint": "请填写 grok2api 地址，不要填 new-api。例如 http://grok2api:8000 或 http://grok2api:8000/v1。若仍 404，说明当前地址没有视频接口。",
+    "type": "string",
+    "default": ""
+   },
+   "api_key": {
+    "description": "API Key",
+    "hint": "grok2api 客户端密钥，将以 Bearer 方式发送。",
+    "type": "string",
+    "default": ""
+   },
+   "model": {
+    "description": "Grok 视频模型",
+    "hint": "推荐 grok-imagine-video 或 grok-imagine-video-1.5。",
+    "type": "string",
+    "default": "grok-imagine-video"
+   },
+   "proxy": {
+    "description": "代理地址",
+    "hint": "可选，示例：http://127.0.0.1:7890。",
+    "type": "string",
+    "default": ""
+   }
+  }
+ },
+ "generation": {
+  "description": "生成与结果设置",
+  "hint": "配置默认模型、秒数、比例、分辨率、结果展示和任务开始提示。",
+  "type": "object",
+  "items": {
+   "model": {
+    "description": "生视频模型",
+    "hint": "可覆盖供应商模型；留空则使用供应商模型。",
+    "type": "string",
+    "default": "grok-imagine-video"
+   },
+   "default_duration": {
+    "description": "默认秒数",
+    "hint": "命令未指定秒数时使用，范围 1-15。",
+    "type": "int",
+    "slider": {
+     "min": 1,
+     "max": 15,
+     "step": 1
+    },
+    "default": 6
+   },
+   "default_aspect_ratio": {
+    "description": "默认宽高比",
+    "hint": "命令与提示词都未指定时使用。",
+    "type": "string",
+    "options": [
+     "1:1",
+     "16:9",
+     "9:16",
+     "4:3",
+     "3:4",
+     "3:2",
+     "2:3"
+    ],
+    "default": "16:9"
+   },
+   "default_resolution": {
+    "description": "默认分辨率",
+    "hint": "默认 720p。Console 实际常仅支持 480p/720p。",
+    "type": "string",
+    "options": [
+     "480p",
+     "720p",
+     "1080p"
+    ],
+    "default": "720p"
+   },
+   "result_info_items": {
+    "description": "显示结果信息",
+    "hint": "视频发送成功后附加的信息。",
+    "type": "list",
+    "options": [
+     "模型",
+     "耗时",
+     "任务ID",
+     "秒数",
+     "比例",
+     "分辨率"
+    ],
+    "default": [
+     "模型",
+     "耗时"
+    ]
+   },
+   "start_task_message_template": {
+    "description": "开始视频任务提示模板",
+    "hint": "支持 {task_id} {prompt} {duration} {aspect_ratio} {resolution} {model} {reference_image_count} {reference_images_block} {mode}。默认格式：已开始视频生成任务 [1张参考图] [6s] [16:9] [任务ID: xxxxxxxx]",
+    "type": "text",
+    "default": "已开始视频生成任务{reference_images_block} [{duration}s] [{aspect_ratio}] [任务ID: {task_id}]"
+   },
+   "auto_delete_after_send": {
+    "description": "发送后自动删除本地视频",
+    "hint": "开启后，视频成功发送给用户后会自动删除插件临时目录中的本地视频文件。",
+    "type": "bool",
+    "default": true
+   },
+   "enable_prompt_enhancement": {
+    "description": "启用提示词增强",
+    "hint": "开启后会在用户提示词后自动追加增强描述；图生/文生可分别配置附加句。",
+    "type": "bool",
+    "default": true
+   },
+   "common_prompt_enhancement": {
+    "description": "通用增强提示词",
+    "hint": "文生与图生都会追加到用户提示词后面。",
+    "type": "text",
+    "default": "画面要求：高细节、清晰边缘、低噪点、运动稳定、时序一致。输出风格自然，不要过度锐化。"
+   },
+   "image_prompt_enhancement": {
+    "description": "图生附加提示词",
+    "hint": "有参考图时追加。默认：保持参考图主体身份、构图和色调风格一致。",
+    "type": "text",
+    "default": "保持参考图主体身份、构图和色调风格一致。"
+   },
+   "text_prompt_enhancement": {
+    "description": "文生附加提示词",
+    "hint": "无参考图时追加。默认：主体动作连贯，镜头转场平滑。",
+    "type": "text",
+    "default": "主体动作连贯，镜头转场平滑。"
+   }
+  }
+ },
+ "runtime": {
+  "description": "运行控制",
+  "hint": "配置超时、重试、并发、排队、不可重试错误和调试日志。",
+  "type": "object",
+  "items": {
+   "timeout_seconds": {
+    "description": "超时时间（秒）",
+    "hint": "单次视频任务最大等待时间，最大 20 分钟。",
+    "type": "int",
+    "slider": {
+     "min": 1,
+     "max": 1200,
+     "step": 10
+    },
+    "default": 600
+   },
+   "retry_attempts": {
+    "description": "重试次数",
+    "hint": "创建请求失败后的额外重试次数。",
+    "type": "int",
+    "slider": {
+     "min": 0,
+     "max": 10,
+     "step": 1
+    },
+    "default": 1
+   },
+   "debug_request_logging": {
+    "description": "打印调试请求日志",
+    "hint": "开启后在 debug 日志中打印请求摘要。",
+    "type": "bool",
+    "default": false
+   },
+   "show_user_error_details": {
+    "description": "向用户显示详细错误信息",
+    "hint": "开启后失败消息包含脱敏后的远端错误详情。",
+    "type": "bool",
+    "default": true
+   },
+   "non_retryable_status_codes": {
+    "description": "不可重试 HTTP 状态码",
+    "hint": "命中这些状态码时立即失败，不再重试。",
+    "type": "list",
+    "default": [
+     400,
+     401,
+     403,
+     404,
+     405,
+     422
+    ]
+   },
+   "non_retryable_error_keywords": {
+    "description": "不可重试错误关键词",
+    "hint": "错误文本包含这些关键词时立即失败。",
+    "type": "list",
+    "default": [
+     "参数",
+     "无效",
+     "不支持",
+     "未配置",
+     "invalid",
+     "bad request",
+     "unauthorized",
+     "forbidden",
+     "not found",
+     "unsupported"
+    ]
+   },
+   "max_concurrent_requests": {
+    "description": "最大并发生成请求数",
+    "hint": "同时调用 grok2api 的请求上限。",
+    "type": "int",
+    "slider": {
+     "min": 1,
+     "max": 20,
+     "step": 1
+    },
+    "default": 3
+   },
+   "max_running_tasks": {
+    "description": "最大并发完整视频任务数",
+    "hint": "同时运行的完整视频任务上限。",
+    "type": "int",
+    "slider": {
+     "min": 1,
+     "max": 20,
+     "step": 1
+    },
+    "default": 3
+   },
+   "max_queued_tasks": {
+    "description": "最大排队视频任务数",
+    "hint": "尚未开始运行的任务队列上限。",
+    "type": "int",
+    "slider": {
+     "min": 0,
+     "max": 200,
+     "step": 1
+    },
+    "default": 20
+   }
+  }
+ },
+ "usage": {
+  "description": "使用限制",
+  "hint": "配置会话黑名单、频率限制、每日额度和参考图限制。",
+  "type": "object",
+  "items": {
+   "umo_blacklist": {
+    "description": "会话 UMO 黑名单",
+    "hint": "填写 unified_msg_origin；命中后无法使用视频功能。",
+    "type": "list",
+    "default": []
+   },
+   "admin_bypass_limits": {
+    "description": "管理员无视使用限制",
+    "hint": "开启后管理员可跳过黑名单、频率限制和每日额度。",
+    "type": "bool",
+    "default": true
+   },
+   "umo_whitelist": {
+    "description": "使用限制白名单 UMO",
+    "hint": "命中后可跳过黑名单、频率限制和每日额度。",
+    "type": "list",
+    "default": []
+   },
+   "blacklist_block_message": {
+    "description": "黑名单拒绝提示",
+    "hint": "黑名单命中时返回给用户的文本。",
+    "type": "string",
+    "default": "❌ 当前会话已被加入黑名单，无法使用视频功能"
+   },
+   "rate_limit_seconds": {
+    "description": "速率限制（秒）",
+    "hint": "同一用户两次请求之间的最小间隔；0 表示不限制。",
+    "type": "int",
+    "slider": {
+     "min": 0,
+     "max": 3600,
+     "step": 1
+    },
+    "default": 0
+   },
+   "max_reference_size_mb": {
+    "description": "最大参考图大小（MB）",
+    "hint": "超过该大小的参考图会被忽略。",
+    "type": "int",
+    "slider": {
+     "min": 1,
+     "max": 100,
+     "step": 1
+    },
+    "default": 10
+   },
+   "max_reference_images": {
+    "description": "最大参考图数量",
+    "hint": "默认 1。API 层最多 8；Build/Console 实际常只支持 1 张。",
+    "type": "int",
+    "slider": {
+     "min": 1,
+     "max": 8,
+     "step": 1
+    },
+    "default": 1
+   },
+   "enable_daily_limit": {
+    "description": "启用每日额度",
+    "hint": "开启后限制每个用户每日可生成视频数量。",
+    "type": "bool",
+    "default": false
+   },
+   "daily_limit_count": {
+    "description": "每日额度",
+    "hint": "每个用户每日可生成的最大视频数量。",
+    "type": "int",
+    "slider": {
+     "min": 1,
+     "max": 1000,
+     "step": 1
+    },
+    "default": 10
+   }
+  }
+ },
+ "platform": {
+  "description": "平台判定",
+  "hint": "QQ 与微信可能同时挂在 aiocqhttp 适配器下，且平台实例名可改。填写机器人账号(self_id)可稳定区分，不依赖实例名。",
+  "type": "object",
+  "items": {
+   "qq_self_ids": {
+    "description": "QQ 机器人账号（self_id）",
+    "hint": "填写 AstrBot 中 QQ 机器人的账号 id。填写后只有匹配该账号的会话按 QQ 处理（清洗+可播放气泡），其余按微信/其他处理（原始 mp4）。留空则按适配器与 id 形态自动判定。",
+    "type": "list",
+    "default": []
+   },
+   "wechat_self_ids": {
+    "description": "微信机器人账号（self_id）",
+    "hint": "可选。填写微信机器人的账号 id，用于把微信会话显式排除出 QQ 判定。",
+    "type": "list",
+    "default": []
+   }
+  }
+ }
+}
