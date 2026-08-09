@@ -87,11 +87,12 @@ class VideoGenerationPlugin(Star):
     def _ensure_temp_dir(self) -> Path:
         """Ensure the plugin temp dir exists.
 
-        AstrBot/Docker temp cleaners may remove it after plugin load; always
-        re-create before writing video bytes.
+        Only create when missing. AstrBot/Docker cleaners may remove it after
+        plugin load, so check again before writing video bytes.
         """
         self.temp_dir = Path(get_astrbot_temp_path()) / "astrbot_plugin_video_generation"
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        if not self.temp_dir.exists():
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
         return self.temp_dir
 
     def _reload_runtime(self) -> None:
