@@ -52,7 +52,7 @@ class VideoGenerationPlugin(Star):
         self.data_dir = Path(StarTools.get_data_dir())
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir = Path(get_astrbot_temp_path()) / "astrbot_plugin_video_generation"
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_temp_dir()
 
         self.config_manager = ConfigManager(config)
         self.task_manager = TaskManager(
@@ -67,6 +67,7 @@ class VideoGenerationPlugin(Star):
         self._bg_tasks: set[asyncio.Task] = set()
 
     async def initialize(self):
+        self._ensure_temp_dir()
         self.task_manager.start_workers()
         logger.info(
             f"{LOG} 插件已加载 model={safe_log_text(self.config_manager.generation.model)} "
@@ -82,6 +83,16 @@ class VideoGenerationPlugin(Star):
             logger.info(f"{LOG} 插件已卸载")
         except Exception as exc:
             logger.error(f"{LOG} 卸载清理失败: {safe_log_text(exc)}", exc_info=True)
+
+    def _ensure_temp_dir(self) -> Path:
+        """Ensure the plugin temp dir exists.
+
+        AstrBot/Docker temp cleaners may remove it after plugin load; always
+        re-create before writing video bytes.
+        """
+        self.temp_dir = Path(get_astrbot_temp_path()) / "astrbot_plugin_video_generation"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        return self.temp_dir
 
     def _reload_runtime(self) -> None:
         self.config_manager.reload(self.raw_config)
@@ -991,7 +1002,8 @@ class VideoGenerationPlugin(Star):
 
         result_path = ""
         if result.video_bytes:
-            path = self.temp_dir / f"{record.task_id}.mp4"
+            temp_dir = self._ensure_temp_dir()
+            path = temp_dir / f"{record.task_id}.mp4"
             path.write_bytes(result.video_bytes)
             result_path = str(path)
 
