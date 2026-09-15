@@ -25,6 +25,8 @@ class AdapterConfig:
     non_retryable_status_codes: list[int] = field(default_factory=list)
     non_retryable_error_keywords: list[str] = field(default_factory=list)
     proxy: str | None = None
+    # ""/on/off: controls the optional audio field (off = muted generation).
+    audio_mode: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
 

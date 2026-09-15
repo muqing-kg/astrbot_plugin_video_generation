@@ -80,6 +80,17 @@
     ],
     "default": "不指定"
    },
+   "generate_audio": {
+    "description": "生成音频",
+    "hint": "关闭 = 静音生成（请求携带 audio:false，需网关支持统一媒体协议）；开启 = audio:true；不指定时不携带该字段，由模型默认决定。不支持的网关会自动剔除该字段。",
+    "type": "string",
+    "options": [
+     "不指定",
+     "开启",
+     "关闭"
+    ],
+    "default": "不指定"
+   },
    "result_info_items": {
     "description": "显示结果信息",
     "hint": "视频发送成功后附加的信息。",

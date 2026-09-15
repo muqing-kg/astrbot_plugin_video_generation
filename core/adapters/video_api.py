@@ -248,6 +248,10 @@ class VideoAPIAdapter:
             and "resolution" not in self._unsupported_fields
         ):
             payload["resolution"] = request.resolution
+        # Muted/explicit audio for unified-media gateways; strict gateways
+        # drop it via the adapt rules and it is remembered.
+        if self.config.audio_mode in ("on", "off"):
+            payload["audio"] = self.config.audio_mode == "on"
         if request.images and "image" not in self._unsupported_fields:
             payload["image"] = {"url": self._image_ref(request.images[0])}
             if len(request.images) > 1 and "images" not in self._unsupported_fields:
@@ -273,6 +277,8 @@ class VideoAPIAdapter:
             payload["aspect_ratio"] = request.aspect_ratio
         if (request.resolution or "").lower() not in UNSPECIFIED_TOKENS:
             payload["resolution"] = request.resolution
+        if self.config.audio_mode in ("on", "off"):
+            payload["audio"] = self.config.audio_mode == "on"
         return payload
 
     async def _upload_reference_media(

@@ -238,6 +238,16 @@ class ConfigManager:
         if not keywords:
             keywords = list(DEFAULT_NON_RETRYABLE_ERROR_KEYWORDS)
 
+        audio_raw = str(
+            _get(generation_raw, "generate_audio", "")
+        ).strip().lower()
+        if audio_raw in ("开启", "on", "true", "1"):
+            audio_mode = "on"
+        elif audio_raw in ("关闭", "off", "false", "0"):
+            audio_mode = "off"
+        else:
+            audio_mode = ""
+
         adapter = AdapterConfig(
             base_url=str(_get(provider, "base_url") or "").strip(),
             api_key=str(_get(provider, "api_key") or "").strip(),
@@ -254,6 +264,7 @@ class ConfigManager:
             ),
             non_retryable_error_keywords=keywords,
             proxy=(str(_get(provider, "proxy") or "").strip() or None),
+            audio_mode=audio_mode,
         )
 
         generation = GenerationSettings(

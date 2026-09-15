@@ -42,6 +42,7 @@ DROPPABLE_FIELDS = (
     "ratio",
     "resolution",
     "size",
+    "audio",
 )
 # Keywords indicating a value/validation complaint (substring match).
 _CONSTRAINT_KEYWORDS = (
