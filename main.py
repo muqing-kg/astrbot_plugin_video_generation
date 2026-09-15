@@ -42,7 +42,7 @@ LOG = log_prefix("Plugin")
     "astrbot_plugin_video_generation",
     "沐倾",
     "通用视频生成插件",
-    "v0.5.0",
+    "v0.5.1",
 )
 class VideoGenerationPlugin(Star):
     _QQ_BASE64_VIDEO_MAX_BYTES = 50 * 1024 * 1024

@@ -22,7 +22,9 @@ from ..shared.constants import (
     MAX_DURATION_SECONDS,
     MAX_TIMEOUT_SECONDS,
     UNSPECIFIED_TOKENS,
+    DEFAULT_PRESET_ENTRIES,
 )
+from ..generation.presets import VideoPreset, parse_presets
 from ..shared.logging import log_prefix, safe_log_text
 from ..shared.types import (
     ProviderConfig,
@@ -164,6 +166,7 @@ class ConfigManager:
 
     def __init__(self, raw_config: Any):
         self.raw = raw_config
+        self._presets: dict[str, VideoPreset] = {}
         self._active: ProviderConfig | None = None
         self.config = self._parse(self.raw)
 
@@ -216,7 +219,7 @@ class ConfigManager:
         return self.config.platform
 
     @property
-    def presets(self) -> dict:
+    def presets(self) -> dict[str, VideoPreset]:
         return self._presets
 
     # ------------------------------------------------------------------
@@ -351,6 +354,15 @@ class ConfigManager:
             qq_self_ids=_as_str_list(_get(platform_raw, "qq_self_ids")),
             wechat_self_ids=_as_str_list(_get(platform_raw, "wechat_self_ids")),
         )
+
+        presets_section = _section(raw, "presets")
+        raw_preset_list = _get(presets_section, "preset_list", None)
+        preset_entries = (
+            list(DEFAULT_PRESET_ENTRIES)
+            if raw_preset_list is None
+            else _as_str_list(raw_preset_list)
+        )
+        self._presets = parse_presets(preset_entries)
 
         providers = self._load_providers(_get(raw, "api_providers", []), generation)
         current = str(_get(raw, "video_model", "") or "").strip()
