@@ -8,8 +8,11 @@ DEFAULT_RETRY_ATTEMPTS = 1
 DEFAULT_DURATION_SECONDS = 6
 MIN_DURATION_SECONDS = 1
 MAX_DURATION_SECONDS = 15
-DEFAULT_ASPECT_RATIO = "16:9"
-DEFAULT_RESOLUTION = "720p"
+# Empty string means "不指定": the field is omitted from upstream requests.
+DEFAULT_ASPECT_RATIO = ""
+DEFAULT_RESOLUTION = ""
+UNSPECIFIED_LABEL = "不指定"
+UNSPECIFIED_TOKENS = {"", "不指定", "none", "auto", "default"}
 DEFAULT_MAX_REFERENCE_IMAGES = 1
 ABSOLUTE_MAX_REFERENCE_IMAGES = 8
 DEFAULT_MAX_REFERENCE_SIZE_MB = 10
@@ -30,8 +33,18 @@ SUPPORTED_ASPECT_RATIOS = (
     "3:4",
     "3:2",
     "2:3",
+    "21:9",
+    "4:5",
+    "5:4",
 )
-SUPPORTED_RESOLUTIONS = ("480p", "720p", "1080p")
+SUPPORTED_RESOLUTIONS = ("480p", "720p", "1080p", "2k", "4k")
+
+DEFAULT_PRESET_ENTRIES = (
+    "电影感:电影感画面，浅景深，自然光影，胶片质感，运镜平缓克制",
+    "赛博朋克:赛博朋克城市夜景，霓虹灯反射，湿润街道，高对比度光效",
+    "治愈系:柔和暖色调，缓慢运镜，微距特写，宁静治愈的氛围",
+    "运镜大师:专业电影运镜，平滑推拉摇移，电影级构图与节奏感",
+)
 
 DEFAULT_NON_RETRYABLE_STATUS_CODES = (400, 401, 403, 404, 405, 422)
 DEFAULT_NON_RETRYABLE_ERROR_KEYWORDS = (

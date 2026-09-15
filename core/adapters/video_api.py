@@ -1,4 +1,4 @@
-"""Grok2API video adapter."""
+"""OpenAI-style video gateway adapter (grok2api / new-api / one-api relays)."""
 
 from __future__ import annotations
 
@@ -13,16 +13,23 @@ import aiohttp
 from astrbot.api import logger
 
 from ..generation.reference import image_to_data_url
-from ..shared.constants import POLL_INTERVAL_SECONDS
+from ..shared.constants import POLL_INTERVAL_SECONDS, UNSPECIFIED_TOKENS
 from ..shared.logging import log_prefix, safe_log_text
-from ..shared.types import AdapterConfig, VideoRequest, VideoResult
+from ..shared.types import AdapterConfig, ImageData, VideoRequest, VideoResult
+from .payload_adapt import adapt_payload
 
 LOG = log_prefix("Adapter")
 API_STATUS_RE = re.compile(r"API 错误\s*\((\d{3})\)")
 
 
-class Grok2APIVideoAdapter:
-    """Talk to grok2api video endpoints, with limited new-api fallbacks."""
+class VideoAPIAdapter:
+    """Talk to OpenAI-style video endpoints across gateways.
+
+    Covers grok2api and Go-gateway relays (new-api etc.) for Grok, Seedance,
+    Kling, Sora and similar models. Field-shape disagreements (image object vs
+    string, duration vs seconds, aspect_ratio vs ratio) are resolved by
+    re-sending a mutated payload when the upstream 4xx body names the field.
+    """
 
     def __init__(self, config: AdapterConfig):
         self.config = config
@@ -157,26 +164,41 @@ class Grok2APIVideoAdapter:
         lowered = (error or "").lower()
         return not any(k.lower() in lowered for k in self.config.non_retryable_error_keywords)
 
+    @staticmethod
+    def _image_ref(image: ImageData) -> str:
+        """Remote http(s) URL as-is; anything else becomes a data URL."""
+        if image.source_url and image.source_url.startswith(("http://", "https://")):
+            return image.source_url
+        return image_to_data_url(image)
+
     def _build_payload(self, request: VideoRequest) -> dict[str, Any]:
-        """Build grok2api-compatible video create body.
+        """Build a video create body for OpenAI-style video gateways.
 
         grok2api rejects unknown fields (DisallowUnknownFields), so do NOT send
-        OpenAI-only aliases like seconds / input_reference.
+        OpenAI-only aliases like seconds / input_reference. Unspecified params
+        ("不指定"/0/empty) are omitted so the model applies its own defaults.
+        `image` is sent as an object first (grok2api form); gateways that
+        require a plain string are corrected by adapt_payload from the upstream
+        400 feedback. Extra reference images go into `image_urls`; gateways
+        that reject the field are handled by the adapt drop rule (first image
+        still applies via `image`).
         """
         payload: dict[str, Any] = {
             "model": request.model or self.config.model,
             "prompt": request.prompt,
-            "duration": int(request.duration),
-            "aspect_ratio": request.aspect_ratio,
-            "resolution": request.resolution,
         }
+        if request.duration and request.duration > 0:
+            payload["duration"] = int(request.duration)
+        if (request.aspect_ratio or "").lower() not in UNSPECIFIED_TOKENS:
+            payload["aspect_ratio"] = request.aspect_ratio
+        if (request.resolution or "").lower() not in UNSPECIFIED_TOKENS:
+            payload["resolution"] = request.resolution
         if request.images:
-            image = request.images[0]
-            if image.source_url and image.source_url.startswith(("http://", "https://")):
-                image_url = image.source_url
-            else:
-                image_url = image_to_data_url(image)
-            payload["image"] = {"url": image_url}
+            payload["image"] = {"url": self._image_ref(request.images[0])}
+            if len(request.images) > 1:
+                payload["image_urls"] = [
+                    self._image_ref(image) for image in request.images
+                ]
         return payload
 
     async def generate(self, request: VideoRequest, *, should_cancel=None) -> VideoResult:
@@ -199,6 +221,7 @@ class Grok2APIVideoAdapter:
 
     async def _generate_once(self, request: VideoRequest, *, should_cancel=None) -> VideoResult:
         payload = self._build_payload(request)
+        adapt_budget = 4
         session = self._session_get()
         timeout = aiohttp.ClientTimeout(total=self.config.timeout)
         prefix = log_prefix("Adapter", request.task_id)
@@ -234,6 +257,17 @@ class Grok2APIVideoAdapter:
                                 f"{prefix} 创建路径不可用 ({resp.status}): {create_url}"
                             )
                             continue
+                        # Field-shape feedback (e.g. image object vs string):
+                        # mutate the payload and retry the same create URL.
+                        if resp.status in {400, 422} and adapt_budget > 0:
+                            adapted = adapt_payload(payload, text)
+                            if adapted is not None:
+                                adapt_budget -= 1
+                                logger.warning(
+                                    f"{prefix} 按上游校验反馈调整请求字段后重试: {create_url}"
+                                )
+                                payload = adapted
+                                continue
                         return VideoResult(error=last_create_error)
                     create_data = await self._safe_json(resp, text)
                     used_create_url = create_url
@@ -297,8 +331,14 @@ class Grok2APIVideoAdapter:
                     await asyncio.sleep(POLL_INTERVAL_SECONDS)
                     continue
 
-                status = str((data or {}).get("status") or "").lower()
-                progress = (data or {}).get("progress")
+                data_obj = data or {}
+                status = str(
+                    data_obj.get("status")
+                    or data_obj.get("task_status")
+                    or data_obj.get("state")
+                    or ""
+                ).lower()
+                progress = data_obj.get("progress")
                 try:
                     progress_num = int(progress) if progress is not None else None
                 except (TypeError, ValueError):
@@ -436,7 +476,7 @@ class Grok2APIVideoAdapter:
             value = data.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-        for nest_key in ("video", "result", "data", "output"):
+        for nest_key in ("video", "videos", "result", "data", "output"):
             nested = data.get(nest_key)
             if isinstance(nested, dict):
                 found = self._extract_video_url(nested)
@@ -444,6 +484,8 @@ class Grok2APIVideoAdapter:
                     return found
             if isinstance(nested, list):
                 for item in nested:
+                    if isinstance(item, str) and item.strip():
+                        return item.strip()
                     found = self._extract_video_url(item if isinstance(item, dict) else None)
                     if found:
                         return found
@@ -467,3 +509,7 @@ class Grok2APIVideoAdapter:
             if detail:
                 return f"{message}: {detail}"
         return message
+
+
+# Backward-compatible alias for existing imports.
+Grok2APIVideoAdapter = VideoAPIAdapter

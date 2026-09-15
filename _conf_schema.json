@@ -1,24 +1,24 @@
 {
  "provider": {
-  "description": "Grok 接口配置",
-  "hint": "仅适配 grok2api。填写 grok2api 地址、客户端密钥和 Grok 视频模型。",
+  "description": "视频 API 配置",
+  "hint": "支持 OpenAI 风格视频接口网关：grok2api、new-api 等（Grok、Seedance、可灵、Sora 中转）。填写网关地址、客户端密钥与视频模型名。",
   "type": "object",
   "items": {
    "base_url": {
     "description": "API 地址",
-    "hint": "请填写 grok2api 地址，不要填 new-api。例如 http://grok2api:8000 或 http://grok2api:8000/v1。若仍 404，说明当前地址没有视频接口。",
+    "hint": "填写视频 API 根地址，例如 http://host:8000 或 http://host:8000/v1。插件会自动尝试 /v1/videos/generations、/v1/videos、/v1/video/generations。",
     "type": "string",
     "default": ""
    },
    "api_key": {
     "description": "API Key",
-    "hint": "grok2api 客户端密钥，将以 Bearer 方式发送。",
+    "hint": "网关客户端密钥，将以 Bearer 方式发送。",
     "type": "string",
     "default": ""
    },
    "model": {
-    "description": "Grok 视频模型",
-    "hint": "推荐 grok-imagine-video 或 grok-imagine-video-1.5。",
+    "description": "视频模型",
+    "hint": "Grok 推荐 grok-imagine-video、grok-imagine-video-1.5；Seedance 等按网关实际模型名填写，例如 seedance-2.5。",
     "type": "string",
     "default": "grok-imagine-video"
    },
@@ -43,40 +43,42 @@
    },
    "default_duration": {
     "description": "默认秒数",
-    "hint": "命令未指定秒数时使用，范围 1-15。",
-    "type": "int",
-    "slider": {
-     "min": 1,
-     "max": 15,
-     "step": 1
-    },
-    "default": 6
+    "hint": "不指定 时请求不携带秒数字段，由模型使用自己的默认时长；也可填 1~15 的数字。",
+    "type": "string",
+    "default": "不指定"
    },
    "default_aspect_ratio": {
     "description": "默认宽高比",
-    "hint": "命令与提示词都未指定时使用。",
+    "hint": "命令与提示词都未指定时使用；不指定时请求不携带比例字段，由网关/模型决定。命令支持任意 W:H 数值比例。",
     "type": "string",
     "options": [
+     "不指定",
      "1:1",
      "16:9",
      "9:16",
      "4:3",
      "3:4",
      "3:2",
-     "2:3"
+     "2:3",
+     "21:9",
+     "4:5",
+     "5:4"
     ],
-    "default": "16:9"
+    "default": "不指定"
    },
    "default_resolution": {
     "description": "默认分辨率",
-    "hint": "默认 720p。Console 实际常仅支持 480p/720p。",
+    "hint": "不指定时请求不携带分辨率字段，由网关/模型决定。",
     "type": "string",
     "options": [
+     "不指定",
      "480p",
      "720p",
-     "1080p"
+     "1080p",
+     "2k",
+     "4k"
     ],
-    "default": "720p"
+    "default": "不指定"
    },
    "result_info_items": {
     "description": "显示结果信息",
@@ -290,7 +292,7 @@
    },
    "max_reference_images": {
     "description": "最大参考图数量",
-    "hint": "默认 1。API 层最多 8；Build/Console 实际常只支持 1 张。",
+    "hint": "按模型实际能力填写。默认 1（多图时只用首图）；大于 1 时插件会附带 image_urls 数组尝试多图，网关不支持会自动回落首图。",
     "type": "int",
     "slider": {
      "min": 1,
@@ -334,6 +336,24 @@
     "hint": "可选。填写微信机器人的账号 id，用于把微信会话显式排除出 QQ 判定。",
     "type": "list",
     "default": []
+   }
+  }
+ },
+ "presets": {
+  "description": "预设提示词",
+  "hint": "/视频 会从提示词开头连续匹配预设名。简单格式：名称:提示词；高级格式：名称:{\"prompt\":\"提示词\",\"aspect_ratio\":\"16:9\",\"resolution\":\"720p\",\"duration\":6,\"model\":\"...\"}。可用 /视频预设 查看，/视频预设 添加 <名称:提示词>、/视频预设 删除 <名称> 管理（管理员）。",
+  "type": "object",
+  "items": {
+   "preset_list": {
+    "description": "预设列表",
+    "hint": "每项一条：名称:提示词 或高级 JSON；支持英文/中文冒号。",
+    "type": "list",
+    "default": [
+     "电影感:电影感画面，浅景深，自然光影，胶片质感，运镜平缓克制",
+     "赛博朋克:赛博朋克城市夜景，霓虹灯反射，湿润街道，高对比度光效",
+     "治愈系:柔和暖色调，缓慢运镜，微距特写，宁静治愈的氛围",
+     "运镜大师:专业电影运镜，平滑推拉摇移，电影级构图与节奏感"
+    ]
    }
   }
  }

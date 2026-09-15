@@ -9,7 +9,6 @@ from ..shared.constants import (
     DEFAULT_BLACKLIST_MESSAGE,
     DEFAULT_COMMON_PROMPT_ENHANCEMENT,
     DEFAULT_DAILY_LIMIT,
-    DEFAULT_DURATION_SECONDS,
     DEFAULT_ENABLE_PROMPT_ENHANCEMENT,
     DEFAULT_IMAGE_PROMPT_ENHANCEMENT,
     DEFAULT_MAX_CONCURRENT_REQUESTS,
@@ -45,7 +44,8 @@ class UsageSettings:
 @dataclass
 class GenerationSettings:
     model: str = "grok-imagine-video"
-    default_duration: int = DEFAULT_DURATION_SECONDS
+    # 0 = 不指定: duration omitted from upstream requests.
+    default_duration: int = 0
     default_aspect_ratio: str = DEFAULT_ASPECT_RATIO
     default_resolution: str = DEFAULT_RESOLUTION
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS

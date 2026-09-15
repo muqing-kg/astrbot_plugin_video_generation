@@ -6,26 +6,22 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..generation.presets import VideoPreset, parse_presets
 from ..shared.constants import (
     ABSOLUTE_MAX_REFERENCE_IMAGES,
-    DEFAULT_ASPECT_RATIO,
     DEFAULT_COMMON_PROMPT_ENHANCEMENT,
     DEFAULT_ENABLE_PROMPT_ENHANCEMENT,
     DEFAULT_IMAGE_PROMPT_ENHANCEMENT,
     DEFAULT_TEXT_PROMPT_ENHANCEMENT,
     DEFAULT_START_TEMPLATE,
-    DEFAULT_DURATION_SECONDS,
     DEFAULT_MAX_REFERENCE_IMAGES,
     DEFAULT_NON_RETRYABLE_ERROR_KEYWORDS,
     DEFAULT_NON_RETRYABLE_STATUS_CODES,
-    DEFAULT_RESOLUTION,
     DEFAULT_RETRY_ATTEMPTS,
     DEFAULT_TIMEOUT_SECONDS,
     MAX_DURATION_SECONDS,
     MAX_TIMEOUT_SECONDS,
-    MIN_DURATION_SECONDS,
-    SUPPORTED_ASPECT_RATIOS,
-    SUPPORTED_RESOLUTIONS,
+    UNSPECIFIED_TOKENS,
 )
 from ..shared.logging import log_prefix, safe_log_text
 from ..shared.types import AdapterConfig
@@ -152,6 +148,7 @@ class ConfigManager:
 
     def __init__(self, raw_config: Any):
         self.raw = raw_config
+        self._presets: dict[str, VideoPreset] = {}
         self.config = self._parse(self.raw)
 
     def reload(self, raw_config: Any | None = None) -> None:
@@ -174,6 +171,10 @@ class ConfigManager:
     @property
     def platform(self) -> PlatformSettings:
         return self.config.platform
+
+    @property
+    def presets(self) -> dict[str, VideoPreset]:
+        return self._presets
 
     def _parse(self, raw: Any) -> PluginConfig:
         provider = _section(raw, "provider")
@@ -209,20 +210,21 @@ class ConfigManager:
             or "grok-imagine-video"
         ).strip() or "grok-imagine-video"
 
-        aspect = str(_get(generation_raw, "default_aspect_ratio") or DEFAULT_ASPECT_RATIO).strip()
-        if aspect not in SUPPORTED_ASPECT_RATIOS:
-            aspect = DEFAULT_ASPECT_RATIO
+        aspect = str(_get(generation_raw, "default_aspect_ratio") or "").strip()
+        if aspect.lower() in UNSPECIFIED_TOKENS:
+            aspect = ""
 
         resolution = str(
-            _get(generation_raw, "default_resolution") or DEFAULT_RESOLUTION
+            _get(generation_raw, "default_resolution") or ""
         ).strip().lower()
-        if resolution not in SUPPORTED_RESOLUTIONS:
-            resolution = DEFAULT_RESOLUTION
+        if resolution in UNSPECIFIED_TOKENS:
+            resolution = ""
 
+        # 0 = 不指定: the duration field is omitted from upstream requests.
         duration = _as_int(
-            _get(generation_raw, "default_duration", DEFAULT_DURATION_SECONDS),
-            DEFAULT_DURATION_SECONDS,
-            minimum=MIN_DURATION_SECONDS,
+            _get(generation_raw, "default_duration", 0),
+            0,
+            minimum=0,
             maximum=MAX_DURATION_SECONDS,
         )
         max_refs = _as_int(
@@ -316,6 +318,10 @@ class ConfigManager:
         platform = PlatformSettings(
             qq_self_ids=_as_str_list(_get(platform_raw, "qq_self_ids")),
             wechat_self_ids=_as_str_list(_get(platform_raw, "wechat_self_ids")),
+        )
+        presets_section = _section(raw, "presets")
+        self._presets = parse_presets(
+            _as_str_list(_get(presets_section, "preset_list"))
         )
         return PluginConfig(
             adapter=adapter,

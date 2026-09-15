@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +17,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.star_tools import StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
-from .core.adapters.grok2api import Grok2APIVideoAdapter
+from .core.adapters.video_api import VideoAPIAdapter
 from .core.config.manager import ConfigManager
 from .core.formatting.result import (
     format_result_info,
@@ -25,6 +26,7 @@ from .core.formatting.result import (
     format_task_list,
 )
 from .core.generation.parser import parse_video_command
+from .core.generation.presets import combine_prompt, match_presets, parse_presets
 from .core.generation.prompt import build_enhanced_video_prompt
 from .core.generation.reference import collect_event_images, detect_image_aspect_ratio
 from .core.shared.logging import log_prefix, safe_log_text
@@ -39,8 +41,8 @@ LOG = log_prefix("Plugin")
 @register(
     "astrbot_plugin_video_generation",
     "muqing-kg",
-    "Grok 生视频插件",
-    "v0.1.1",
+    "通用视频生成插件",
+    "v0.4.0",
 )
 class VideoGenerationPlugin(Star):
     _QQ_BASE64_VIDEO_MAX_BYTES = 50 * 1024 * 1024
@@ -61,7 +63,7 @@ class VideoGenerationPlugin(Star):
             enable_history=False,
             persistence_file=None,
         )
-        self.adapter = Grok2APIVideoAdapter(self.config_manager.adapter)
+        self.adapter = VideoAPIAdapter(self.config_manager.adapter)
         self._rate_limit_until: dict[str, float] = {}
         self._daily_usage: dict[str, dict[str, int]] = {}
         self._bg_tasks: set[asyncio.Task] = set()
@@ -97,7 +99,7 @@ class VideoGenerationPlugin(Star):
 
     def _reload_runtime(self) -> None:
         self.config_manager.reload(self.raw_config)
-        self.adapter = Grok2APIVideoAdapter(self.config_manager.adapter)
+        self.adapter = VideoAPIAdapter(self.config_manager.adapter)
         self.task_manager.configure(
             max_running_tasks=self.config_manager.generation.max_running_tasks,
             max_queued_tasks=self.config_manager.generation.max_queued_tasks,
@@ -840,6 +842,124 @@ class VideoGenerationPlugin(Star):
             return
         yield event.plain_result(f"✅ 已请求取消任务 {updated.task_id}")
 
+    def _preset_entries_from_config(self) -> list[str]:
+        try:
+            section = self.raw_config.get("presets")
+            entries = section.get("preset_list") if isinstance(section, dict) else None
+            if isinstance(entries, str):
+                return [entries] if entries.strip() else []
+            if isinstance(entries, (list, tuple)):
+                return [str(item) for item in entries if str(item).strip()]
+        except Exception as exc:
+            logger.warning(f"{LOG} 读取预设配置失败: {safe_log_text(exc)}")
+        return []
+
+    def _save_preset_entries(self, entries: list[str]) -> bool:
+        try:
+            section = self.raw_config.get("presets")
+            if not isinstance(section, dict):
+                section = {}
+                self.raw_config["presets"] = section
+            section["preset_list"] = entries
+            save = getattr(self.raw_config, "save_config", None)
+            if callable(save):
+                save()
+            return True
+        except Exception as exc:
+            logger.error(f"{LOG} 保存预设配置失败: {safe_log_text(exc)}", exc_info=True)
+            return False
+
+    def _upsert_preset_entry(self, name: str, content: str) -> bool:
+        entries = self._preset_entries_from_config()
+        entry_text = f"{name}:{content}"
+        kept = [
+            item
+            for item in entries
+            if name not in parse_presets([item])
+        ]
+        kept.append(entry_text)
+        return self._save_preset_entries(kept)
+
+    def _remove_preset_entry(self, name: str) -> bool:
+        entries = self._preset_entries_from_config()
+        kept: list[str] = []
+        removed = False
+        for item in entries:
+            if name in parse_presets([item]):
+                removed = True
+                continue
+            kept.append(item)
+        if removed:
+            self._save_preset_entries(kept)
+        return removed
+
+    @filter.command("视频预设")
+    async def preset_command(self, event: AstrMessageEvent):
+        self._reload_runtime()
+        text = (event.message_str or "").strip()
+        for prefix in ("/视频预设", "／视频预设", "视频预设"):
+            if text.startswith(prefix):
+                text = text[len(prefix) :].strip()
+                break
+        presets = self.config_manager.presets
+
+        if not text:
+            if not presets:
+                yield event.plain_result(
+                    "暂无预设。管理员可用 /视频预设 添加 <名称:提示词> 添加，"
+                    "之后 /视频 <名称> [额外提示词] 调用"
+                )
+                return
+            lines = ["已配置的预设提示词（/视频 <名称> [额外提示词] 调用）:"]
+            for index, preset in enumerate(presets.values(), start=1):
+                label = f" | {preset.params_label}" if preset.params_label else ""
+                lines.append(f"{index}. {preset.name} — {preset.prompt[:60]}{label}")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        action, _, rest = text.partition(" ")
+        rest = rest.strip()
+        if action in ("添加", "新增", "add"):
+            if not self._is_admin(event):
+                yield event.plain_result("❌ 仅管理员可管理预设")
+                return
+            parts = re.split(r"[:：]", rest, maxsplit=1)
+            if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+                yield event.plain_result("用法: /视频预设 添加 <名称:提示词>（名称请勿为纯数字）")
+                return
+            name, content = parts[0].strip(), parts[1].strip()
+            if not self._upsert_preset_entry(name, content):
+                yield event.plain_result("❌ 预设保存失败，请查看插件日志")
+                return
+            self._reload_runtime()
+            total = len(self.config_manager.presets)
+            yield event.plain_result(
+                f"✅ 已保存预设「{name}」（共 {total} 个），用 /视频 {name} [额外提示词] 调用"
+            )
+            return
+        if action in ("删除", "移除", "del", "remove"):
+            if not self._is_admin(event):
+                yield event.plain_result("❌ 仅管理员可管理预设")
+                return
+            if not rest:
+                yield event.plain_result("用法: /视频预设 删除 <名称>")
+                return
+            if not self._remove_preset_entry(rest):
+                yield event.plain_result(f"❌ 未找到预设: {rest}")
+                return
+            self._reload_runtime()
+            yield event.plain_result(f"✅ 已删除预设「{rest}」")
+            return
+
+        preset = presets.get(text)
+        if not preset:
+            yield event.plain_result(f"❌ 未找到预设: {text}，用 /视频预设 查看全部")
+            return
+        lines = [f"预设: {preset.name}", f"提示词: {preset.prompt}"]
+        if preset.params_label:
+            lines.append(f"参数: {preset.params_label}")
+        yield event.plain_result("\n".join(lines))
+
     @filter.command("视频")
     async def video_command(self, event: AstrMessageEvent):
         self._reload_runtime()
@@ -883,24 +1003,52 @@ class VideoGenerationPlugin(Star):
             return
 
         mode = "image" if images else "text"
-        # Image-to-video: auto-fit aspect from reference image unless user forced one.
-        aspect_ratio = parsed.aspect_ratio
-        if mode == "image" and not parsed.aspect_explicit and images:
+        matched_presets, extra_prompt = match_presets(
+            parsed.prompt, self.config_manager.presets
+        )
+        prompt_text = combine_prompt(matched_presets, extra_prompt)
+        preset = matched_presets[0] if matched_presets else None
+
+        # Precedence per param: explicit (positional/inline) > preset >
+        # [aspect only] image auto-fit > config default. 0/"" = 不指定, which
+        # is omitted from the upstream request so the model applies defaults.
+        duration = parsed.duration if parsed.duration_explicit else 0
+        if not duration and preset and preset.duration:
+            duration = preset.duration
+        if not duration:
+            duration = parsed.duration
+
+        aspect_ratio = parsed.aspect_ratio if parsed.aspect_explicit else ""
+        if not aspect_ratio and preset and preset.aspect_ratio:
+            aspect_ratio = preset.aspect_ratio
+        if mode == "image" and not aspect_ratio and images:
             detected = detect_image_aspect_ratio(images[0])
             if detected:
                 aspect_ratio = detected
                 logger.info(
                     f"{LOG} 图生视频自动适配比例: {detected} (task preview)"
                 )
-        model = self.config_manager.generation.model or self.config_manager.adapter.model
+        if not aspect_ratio:
+            aspect_ratio = parsed.aspect_ratio
+
+        resolution = parsed.resolution if parsed.resolution_explicit else ""
+        if not resolution and preset and preset.resolution:
+            resolution = preset.resolution
+        if not resolution:
+            resolution = parsed.resolution
+        model = (
+            (preset.model if preset and preset.model else "")
+            or self.config_manager.generation.model
+            or self.config_manager.adapter.model
+        )
         task_id = new_task_id()
         record = VideoTaskRecord(
             task_id=task_id,
             unified_msg_origin=event.unified_msg_origin,
-            prompt=parsed.prompt,
-            duration=parsed.duration,
+            prompt=prompt_text,
+            duration=duration,
             aspect_ratio=aspect_ratio,
-            resolution=parsed.resolution,
+            resolution=resolution,
             model=model,
             reference_image_count=len(images),
             mode=mode,
@@ -913,13 +1061,14 @@ class VideoGenerationPlugin(Star):
         start_text = format_start_task_message(
             self.config_manager.generation.start_task_message_template,
             task_id=task_id,
-            prompt=parsed.prompt,
-            duration=parsed.duration,
+            prompt=prompt_text,
+            duration=duration,
             aspect_ratio=aspect_ratio,
-            resolution=parsed.resolution,
+            resolution=resolution,
             model=model,
             reference_image_count=len(images),
             mode=mode,
+            preset_names=[item.name for item in matched_presets],
         )
         yield event.plain_result(start_text)
 
