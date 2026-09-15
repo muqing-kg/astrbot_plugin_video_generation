@@ -227,6 +227,18 @@ class VideoAPIAdapter:
         prefix = log_prefix("Adapter", request.task_id)
         start = time.time()
 
+        # Diagnostic: how the reference image travels. Upstream video APIs
+        # usually require a publicly fetchable URL and reject base64.
+        if request.images:
+            first = request.images[0]
+            if first.source_url and first.source_url.startswith(("http://", "https://")):
+                image_desc = f"url={safe_log_text(first.source_url, 100)}"
+            else:
+                image_desc = f"base64(data_len={len(first.data)})"
+            logger.info(
+                f"{prefix} 参考图发送形态: {image_desc} images={len(request.images)}"
+            )
+
         create_urls = self._candidate_create_urls()
         last_create_error = "创建视频任务失败"
         create_data: dict[str, Any] | None = None

@@ -322,7 +322,13 @@ async def collect_event_images(
         except Exception:
             pass
 
+    public_count = sum(
+        1
+        for image in images
+        if image.source_url and image.source_url.startswith(("http://", "https://"))
+    )
     logger.info(
-        f"{LOG} 参考图收集完成: count={len(images)} direct={direct_found} reply={reply_found}"
+        f"{LOG} 参考图收集完成: count={len(images)} public_url={public_count} "
+        f"direct={direct_found} reply={reply_found}"
     )
     return images[:max_images]
