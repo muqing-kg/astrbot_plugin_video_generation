@@ -119,7 +119,13 @@ async def download_image(url: str, *, max_bytes: int, timeout: int = 30) -> Imag
                 mime = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
                 if not mime.startswith("image/"):
                     mime = guess_mime(urlparse(url).path)
-                return ImageData(data=data, mime_type=mime, source_url=url)
+                # Keep the URL as source only when a remote video API could
+                # fetch it itself; otherwise force the data-URL fallback.
+                return ImageData(
+                    data=data,
+                    mime_type=mime,
+                    source_url=url if _is_public_http_url(url) else None,
+                )
     except Exception as exc:
         logger.warning(f"{LOG} 下载参考图失败: {safe_log_text(exc)}")
         return None
@@ -150,7 +156,39 @@ def _candidate_from_obj(obj: Any) -> list[str]:
     return refs
 
 
+def _is_public_http_url(url: str) -> bool:
+    """True for http(s) URLs a remote video API can plausibly fetch itself.
+
+    Loopback / LAN addresses (NapCat local file servers etc.) are excluded:
+    the upstream would not be able to reach them, and base64 data URLs are
+    rejected by many video backends (Seedance/Volcengine among them).
+    """
+    if not url.startswith(("http://", "https://")):
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    if not host or host == "localhost" or host.endswith(".local"):
+        return False
+    if host.startswith(("127.", "10.", "192.168.")):
+        return False
+    if host.startswith("172."):
+        second = host.split(".")[1] if host.count(".") >= 3 else ""
+        if second.isdigit() and 16 <= int(second) <= 31:
+            return False
+    return True
+
+
 async def _image_from_component(component: Any, *, max_bytes: int) -> ImageData | None:
+    candidates = _candidate_from_obj(component)
+
+    # Prefer publicly fetchable http(s) URLs: the upstream video API fetches
+    # the image itself and typically rejects base64/data URLs. convert_to_
+    # file_path yields a LOCAL path which would force a data URL.
+    for candidate in candidates:
+        if _is_public_http_url(candidate):
+            image = await download_image(candidate, max_bytes=max_bytes)
+            if image:
+                return image
+
     convert = getattr(component, "convert_to_file_path", None)
     if callable(convert):
         try:
@@ -162,7 +200,7 @@ async def _image_from_component(component: Any, *, max_bytes: int) -> ImageData 
         except Exception as exc:
             logger.debug(f"{LOG} convert_to_file_path 失败: {safe_log_text(exc)}")
 
-    for candidate in _candidate_from_obj(component):
+    for candidate in candidates:
         image = await download_image(candidate, max_bytes=max_bytes)
         if image:
             return image

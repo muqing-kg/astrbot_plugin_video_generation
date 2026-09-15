@@ -158,6 +158,7 @@ QQ 与微信可能同时挂在同一个 aiocqhttp 适配器下，且 AstrBot 平
 ## 注意
 
 - 视频接口按 OpenAI 风格网关设计；火山方舟（Ark）原生接口未适配，Seedance 等请经 new-api 等网关使用
+- **图生参考图必须是上游可拉取的图片**：插件优先使用消息里的公网图床 URL（QQ 图片链接通常可用）；仅拿到本地文件时会转 base64 发送，而 Seedance/方舟系上游不允许 base64（报 `base64 image is not allowed`），此时请直接以图片消息形式发图触发
 - 不要把视频模型当 Chat/Responses 调用
 - Build/Console 图生视频通常只稳吃 1 张首图
 - 图生视频也必须带提示词
