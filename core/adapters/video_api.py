@@ -384,7 +384,10 @@ class VideoAPIAdapter:
         use_multipart = False
 
         try:
-            for create_url in create_urls:
+            url_index = 0
+            exhausted = True
+            while url_index < len(create_urls):
+                create_url = create_urls[url_index]
                 if should_cancel and should_cancel():
                     return VideoResult(error="任务已取消")
                 if self.config.debug_request_logging:
@@ -414,6 +417,7 @@ class VideoAPIAdapter:
                             logger.warning(
                                 f"{prefix} 创建路径不可用 ({resp.status}): {create_url}"
                             )
+                            url_index += 1
                             continue
                         # Unified-media gateways reject base64 /
                         # JSON-shaped image references: upload the media to
@@ -468,12 +472,13 @@ class VideoAPIAdapter:
                         return VideoResult(error=last_create_error)
                     create_data = await self._safe_json(resp, text)
                     used_create_url = create_url
+                    exhausted = False
                     break
-            else:
+            if exhausted:
                 hint = (
-                    "当前地址没有可用的视频创建接口。"
-                    "请确认 API 地址指向 grok2api（支持 /v1/videos/generations），"
-                    "而不是只支持 chat 的中转。"
+                    "已尝试所有创建路径均失败。"
+                    "请确认 API 地址指向支持视频生成的服务"
+                    "（grok2api / 统一媒体 / Sora 风格），而不是只支持 chat 的中转。"
                 )
                 return VideoResult(error=f"{last_create_error}；{hint}")
 
