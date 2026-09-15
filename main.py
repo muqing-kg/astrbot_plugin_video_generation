@@ -17,7 +17,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.star_tools import StarTools
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
-from .core.adapters.video_api import VideoAPIAdapter
+from .core.adapters.generator import VideoGenerator
 from .core.config.manager import ConfigManager
 from .core.formatting.result import (
     format_result_info,
@@ -40,9 +40,9 @@ LOG = log_prefix("Plugin")
 
 @register(
     "astrbot_plugin_video_generation",
-    "muqing-kg",
+    "沐倾",
     "通用视频生成插件",
-    "v0.4.6",
+    "v0.5.0",
 )
 class VideoGenerationPlugin(Star):
     _QQ_BASE64_VIDEO_MAX_BYTES = 50 * 1024 * 1024
@@ -63,7 +63,10 @@ class VideoGenerationPlugin(Star):
             enable_history=False,
             persistence_file=None,
         )
-        self.adapter = VideoAPIAdapter(self.config_manager.adapter)
+        self.generator: VideoGenerator | None = None
+        active_provider = self.config_manager.active_provider
+        if active_provider is not None:
+            self.generator = VideoGenerator(active_provider)
         self._rate_limit_until: dict[str, float] = {}
         self._daily_usage: dict[str, dict[str, int]] = {}
         self._bg_tasks: set[asyncio.Task] = set()
@@ -71,15 +74,20 @@ class VideoGenerationPlugin(Star):
     async def initialize(self):
         self._ensure_temp_dir()
         self.task_manager.start_workers()
+        active = self.config_manager.active_provider
+        active_desc = (
+            f"{active.name}/{active.model}" if active is not None else "未配置供应商"
+        )
         logger.info(
-            f"{LOG} 插件已加载 model={safe_log_text(self.config_manager.generation.model)} "
+            f"{LOG} 插件已加载 line={safe_log_text(active_desc)} "
             f"timeout={self.config_manager.generation.timeout_seconds}s"
         )
 
     async def terminate(self):
         try:
             await self.task_manager.stop()
-            await self.adapter.close()
+            if self.generator is not None:
+                await self.generator.close()
             for task in list(self._bg_tasks):
                 task.cancel()
             logger.info(f"{LOG} 插件已卸载")
@@ -97,15 +105,20 @@ class VideoGenerationPlugin(Star):
             self.temp_dir.mkdir(parents=True, exist_ok=True)
         return self.temp_dir
 
-    def _reload_runtime(self) -> None:
+    async def _reload_runtime(self) -> None:
         self.config_manager.reload(self.raw_config)
-        self.adapter = VideoAPIAdapter(self.config_manager.adapter)
         self.task_manager.configure(
             max_running_tasks=self.config_manager.generation.max_running_tasks,
             max_queued_tasks=self.config_manager.generation.max_queued_tasks,
             enable_history=False,
         )
         self.task_manager.start_workers()
+        active_provider = self.config_manager.active_provider
+        if self.generator is not None:
+            await self.generator.close()
+            self.generator = None
+        if active_provider is not None:
+            self.generator = VideoGenerator(active_provider)
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         try:
@@ -328,8 +341,8 @@ class VideoGenerationPlugin(Star):
                 )
 
         # base64:// inline payload: best when AstrBot and NapCat do not share FS.
-        # Must run after _prepare_qq_playable_mp4 (C2PA uuid stripped); raw Grok MP4
-        # base64 still fails NT EventChecker. Skipped when callback_api_base is set
+        # Must run after _prepare_qq_playable_mp4 (C2PA uuid stripped); raw model MP4
+        # with C2PA credentials still fails NT EventChecker. Skipped when callback_api_base is set
         # (Video.to_dict() would treat base64:// as a path and raise FileNotFoundError).
         if allow_base64 and not self._callback_api_base_configured():
             try:
@@ -349,7 +362,7 @@ class VideoGenerationPlugin(Star):
         # Absolute path form (FileTokenService accepts real paths).
         try_append(lambda: video_cls(file=abs_path, path=abs_path))
 
-        # Public URL only if truly http(s). grok2api content URLs need Bearer and
+        # Public URL only if truly http(s). Grok gateway content URLs need Bearer and
         # usually cannot be fetched anonymously by NapCat.
         if result_url and result_url.startswith(("http://", "https://")):
             if callable(getattr(video_cls, "fromURL", None)):
@@ -423,7 +436,7 @@ class VideoGenerationPlugin(Star):
         """Write a QQ-safer MP4 without ffmpeg.
 
         Pipeline goal: local downloaded mp4 -> cleaned local mp4 -> send as Video card.
-        Grok/xAI MP4s embed a top-level `uuid` C2PA content credential and a large
+        Some model MP4s embed a top-level `uuid` C2PA content credential and a large
         moov/udta. QQ/NT Video elements reject such files even after base64 inline.
 
         IMPORTANT: we never REMOVE boxes that precede `mdat` -- removing them would
@@ -813,7 +826,7 @@ class VideoGenerationPlugin(Star):
 
     @filter.command("视频任务")
     async def video_task_command(self, event: AstrMessageEvent, task_id: str = ""):
-        self._reload_runtime()
+        await self._reload_runtime()
         task_id = (task_id or "").strip()
         if task_id:
             record = self._resolve_task_ref(event, task_id, active_only=False)
@@ -827,7 +840,7 @@ class VideoGenerationPlugin(Star):
 
     @filter.command("视频取消")
     async def video_cancel_command(self, event: AstrMessageEvent, task_id: str = ""):
-        self._reload_runtime()
+        await self._reload_runtime()
         task_id = (task_id or "").strip()
         if not task_id:
             yield event.plain_result("用法: /视频取消 <编号或任务ID>")
@@ -895,7 +908,7 @@ class VideoGenerationPlugin(Star):
 
     @filter.command("视频预设")
     async def preset_command(self, event: AstrMessageEvent):
-        self._reload_runtime()
+        await self._reload_runtime()
         text = (event.message_str or "").strip()
         for prefix in ("/视频预设", "／视频预设", "视频预设"):
             if text.startswith(prefix):
@@ -931,7 +944,7 @@ class VideoGenerationPlugin(Star):
             if not self._upsert_preset_entry(name, content):
                 yield event.plain_result("❌ 预设保存失败，请查看插件日志")
                 return
-            self._reload_runtime()
+            await self._reload_runtime()
             total = len(self.config_manager.presets)
             yield event.plain_result(
                 f"✅ 已保存预设「{name}」（共 {total} 个），用 /视频 {name} [额外提示词] 调用"
@@ -947,7 +960,7 @@ class VideoGenerationPlugin(Star):
             if not self._remove_preset_entry(rest):
                 yield event.plain_result(f"❌ 未找到预设: {rest}")
                 return
-            self._reload_runtime()
+            await self._reload_runtime()
             yield event.plain_result(f"✅ 已删除预设「{rest}」")
             return
 
@@ -960,14 +973,59 @@ class VideoGenerationPlugin(Star):
             lines.append(f"参数: {preset.params_label}")
         yield event.plain_result("\n".join(lines))
 
+    @filter.command("视频模型")
+    async def video_model_command(self, event: AstrMessageEvent, choice: str = ""):
+        await self._reload_runtime()
+        choices = self.config_manager.model_choices()
+        if not choices:
+            yield event.plain_result("暂无可用视频线路，请先在插件配置页「视频供应商」中添加")
+            return
+        current = self.config_manager.current_model_setting or (
+            f"{self.generator.provider.name}/{self.generator.provider.model}"
+            if self.generator is not None and self.generator.provider.model
+            else ""
+        )
+        if not choice:
+            lines = ["可用视频线路（/视频模型 <序号> 切换）:"]
+            for index, item in enumerate(choices, start=1):
+                lines.append(f"{index}. {item}" + ("  ✓" if item == current else ""))
+            yield event.plain_result("\n".join(lines))
+            return
+        target = None
+        if choice.isdigit():
+            index = int(choice)
+            if 1 <= index <= len(choices):
+                target = choices[index - 1]
+        elif choice in choices:
+            target = choice
+        else:
+            for item in choices:
+                if item.startswith(choice) or choice in item:
+                    target = item
+                    break
+        if target is None:
+            yield event.plain_result(f"❌ 未找到对应的视频线路: {choice}")
+            return
+        self.config_manager.save_video_model(target)
+        await self._reload_runtime()
+        yield event.plain_result(f"✅ 当前视频线路: {target}")
+
     @filter.command("视频")
     async def video_command(self, event: AstrMessageEvent):
-        self._reload_runtime()
+        await self._reload_runtime()
         if limit_msg := self._check_limits(event):
             yield event.plain_result(limit_msg)
             return
         if rejection := self.task_manager.get_queue_rejection():
             yield event.plain_result(rejection)
+            return
+        if self.generator is None or self.generator.provider is None:
+            yield event.plain_result("❌ 请先在插件配置页「视频供应商」中添加供应商")
+            return
+        if not self.generator.provider.model:
+            yield event.plain_result(
+                "❌ 当前供应商未选择模型，请用 /视频模型 切换或在配置中填写模型列表"
+            )
             return
 
         message = ""
@@ -1038,8 +1096,7 @@ class VideoGenerationPlugin(Star):
             resolution = parsed.resolution
         model = (
             (preset.model if preset and preset.model else "")
-            or self.config_manager.generation.model
-            or self.config_manager.adapter.model
+            or self.generator.provider.model
         )
         task_id = new_task_id()
         record = VideoTaskRecord(
@@ -1112,7 +1169,7 @@ class VideoGenerationPlugin(Star):
             latest = self.task_manager.get(record.task_id)
             return bool(latest and latest.cancel_requested)
 
-        result = await self.adapter.generate(request, should_cancel=should_cancel)
+        result = await self.generator.generate(request, should_cancel=should_cancel)
         latest = self.task_manager.get(record.task_id)
         if not latest:
             return

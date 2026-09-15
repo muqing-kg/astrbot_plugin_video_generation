@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -13,21 +14,48 @@ class ImageData:
     source_url: str | None = None
 
 
+class VideoAdapterType(str, enum.Enum):
+    """Supported video gateway adapter types (one fixed protocol each)."""
+
+    UNIFIED_MEDIA = "unified_media"
+    SORA = "sora"
+    GROK = "grok"
+
+
+class VideoCapability(enum.Flag):
+    """Capabilities switchable per provider instance."""
+
+    NONE = 0
+    TEXT_TO_VIDEO = enum.auto()
+    IMAGE_TO_VIDEO = enum.auto()
+    ASPECT_RATIO = enum.auto()
+    RESOLUTION = enum.auto()
+    AUDIO = enum.auto()
+
+
 @dataclass
-class AdapterConfig:
+class ProviderConfig:
+    """One configured video provider instance (from a template_list entry)."""
+
+    type: VideoAdapterType = VideoAdapterType.UNIFIED_MEDIA
+    name: str = ""
     base_url: str = ""
     api_key: str = ""
-    model: str = "grok-imagine-video"
-    timeout: int = 600
-    max_retry_attempts: int = 1
-    debug_request_logging: bool = False
-    show_user_error_details: bool = False
-    non_retryable_status_codes: list[int] = field(default_factory=list)
-    non_retryable_error_keywords: list[str] = field(default_factory=list)
+    model: str = ""
+    available_models: list[str] = field(default_factory=list)
+    capabilities: VideoCapability = (
+        VideoCapability.TEXT_TO_VIDEO
+        | VideoCapability.IMAGE_TO_VIDEO
+        | VideoCapability.ASPECT_RATIO
+        | VideoCapability.RESOLUTION
+        | VideoCapability.AUDIO
+    )
     proxy: str | None = None
+    timeout: int = 600
+    max_retry_attempts: int = 2
     # ""/on/off: controls the optional audio field (off = muted generation).
     audio_mode: str = ""
-    extra: dict[str, Any] = field(default_factory=dict)
+    show_user_error_details: bool = True
 
 
 @dataclass

@@ -25,7 +25,7 @@ from ..shared.constants import (
     DEFAULT_NON_RETRYABLE_ERROR_KEYWORDS,
     DEFAULT_NON_RETRYABLE_STATUS_CODES,
 )
-from ..shared.types import AdapterConfig
+from ..shared.types import ProviderConfig
 
 
 @dataclass
@@ -43,8 +43,6 @@ class UsageSettings:
 
 @dataclass
 class GenerationSettings:
-    model: str = "grok-imagine-video"
-    # 0 = 不指定: duration omitted from upstream requests.
     default_duration: int = 0
     default_aspect_ratio: str = DEFAULT_ASPECT_RATIO
     default_resolution: str = DEFAULT_RESOLUTION
@@ -68,6 +66,8 @@ class GenerationSettings:
     common_prompt_enhancement: str = DEFAULT_COMMON_PROMPT_ENHANCEMENT
     image_prompt_enhancement: str = DEFAULT_IMAGE_PROMPT_ENHANCEMENT
     text_prompt_enhancement: str = DEFAULT_TEXT_PROMPT_ENHANCEMENT
+    # ""/on/off: controls the optional audio field (off = muted generation).
+    generate_audio: str = ""
 
 
 @dataclass
@@ -85,7 +85,9 @@ class PlatformSettings:
 
 @dataclass
 class PluginConfig:
-    adapter: AdapterConfig = field(default_factory=AdapterConfig)
+    providers: list[ProviderConfig] = field(default_factory=list)
+    # Active selection in "供应商名称/模型名称" form, managed by /视频模型.
+    current_model: str = ""
     usage: UsageSettings = field(default_factory=UsageSettings)
     generation: GenerationSettings = field(default_factory=GenerationSettings)
     platform: PlatformSettings = field(default_factory=PlatformSettings)

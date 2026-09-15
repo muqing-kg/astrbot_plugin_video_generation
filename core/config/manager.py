@@ -1,12 +1,12 @@
-"""Config manager for Grok video plugin."""
+"""Config manager for the video generation plugin."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from astrbot.api import logger
 
-from ..generation.presets import VideoPreset, parse_presets
 from ..shared.constants import (
     ABSOLUTE_MAX_REFERENCE_IMAGES,
     DEFAULT_COMMON_PROMPT_ENHANCEMENT,
@@ -24,10 +24,27 @@ from ..shared.constants import (
     UNSPECIFIED_TOKENS,
 )
 from ..shared.logging import log_prefix, safe_log_text
-from ..shared.types import AdapterConfig
-from .models import GenerationSettings, PlatformSettings, PluginConfig, UsageSettings
+from ..shared.types import (
+    ProviderConfig,
+    VideoAdapterType,
+    VideoCapability,
+)
+from .models import (
+    GenerationSettings,
+    PlatformSettings,
+    PluginConfig,
+    UsageSettings,
+)
 
 LOG = log_prefix("Config")
+
+_CAPABILITY_LABELS = {
+    "文生视频": VideoCapability.TEXT_TO_VIDEO,
+    "图生视频": VideoCapability.IMAGE_TO_VIDEO,
+    "宽高比": VideoCapability.ASPECT_RATIO,
+    "分辨率": VideoCapability.RESOLUTION,
+    "音频": VideoCapability.AUDIO,
+}
 
 
 def _as_int(
@@ -108,7 +125,7 @@ def _as_int_list(value: Any, default: list[int]) -> list[int]:
 
 
 def _section(raw: Any, name: str) -> dict[str, Any]:
-    """Read one config section safely from AstrBotConfig or dict-like objects."""
+    """Read one dict config section safely from AstrBotConfig or dict-like objects."""
     value: Any = {}
     try:
         if raw is None:
@@ -127,7 +144,6 @@ def _section(raw: Any, name: str) -> dict[str, Any]:
         return {}
     if isinstance(value, dict):
         return value
-    # Some builds may expose mapping-like objects.
     if hasattr(value, "items") and not isinstance(value, (str, bytes, list, tuple)):
         try:
             return dict(value.items())
@@ -144,11 +160,11 @@ def _get(cfg: dict[str, Any], key: str, default: Any = None) -> Any:
 
 
 class ConfigManager:
-    """Load Grok video plugin settings from AstrBotConfig."""
+    """Load video generation plugin settings from AstrBotConfig."""
 
     def __init__(self, raw_config: Any):
         self.raw = raw_config
-        self._presets: dict[str, VideoPreset] = {}
+        self._active: ProviderConfig | None = None
         self.config = self._parse(self.raw)
 
     def reload(self, raw_config: Any | None = None) -> None:
@@ -157,58 +173,74 @@ class ConfigManager:
         self.config = self._parse(self.raw)
 
     @property
-    def adapter(self) -> AdapterConfig:
-        return self.config.adapter
+    def providers(self) -> list[ProviderConfig]:
+        return self.config.providers
 
     @property
-    def usage(self) -> UsageSettings:
-        return self.config.usage
+    def current_model_setting(self) -> str:
+        return self.config.current_model
+
+    @property
+    def active_provider(self) -> ProviderConfig | None:
+        return self._active
+
+    def model_choices(self) -> list[str]:
+        """Flat "供应商名称/模型名称" choices across all provider instances."""
+        choices: list[str] = []
+        for provider in self.config.providers:
+            for model in provider.available_models:
+                choices.append(f"{provider.name}/{model}")
+        return choices
+
+    def save_video_model(self, choice: str) -> None:
+        """Persist the active 供应商/模型 selection."""
+        try:
+            self.raw["video_model"] = choice
+            save = getattr(self.raw, "save_config", None)
+            if callable(save):
+                save()
+        except Exception as exc:
+            logger.error(f"{LOG} 保存视频线路失败: {safe_log_text(exc)}", exc_info=True)
+        self.reload()
 
     @property
     def generation(self) -> GenerationSettings:
         return self.config.generation
 
     @property
+    def usage(self) -> UsageSettings:
+        return self.config.usage
+
+    @property
     def platform(self) -> PlatformSettings:
         return self.config.platform
 
     @property
-    def presets(self) -> dict[str, VideoPreset]:
+    def presets(self) -> dict:
         return self._presets
 
+    # ------------------------------------------------------------------
+    # Parsing
+    # ------------------------------------------------------------------
+
     def _parse(self, raw: Any) -> PluginConfig:
-        provider = _section(raw, "provider")
         generation_raw = _section(raw, "generation")
         runtime_raw = _section(raw, "runtime")
         usage_raw = _section(raw, "usage")
         platform_raw = _section(raw, "platform")
 
         timeout = _as_int(
-            _get(
-                runtime_raw,
-                "timeout_seconds",
-                _get(provider, "timeout", DEFAULT_TIMEOUT_SECONDS),
-            ),
+            _get(runtime_raw, "timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
             DEFAULT_TIMEOUT_SECONDS,
             minimum=1,
             maximum=MAX_TIMEOUT_SECONDS,
         )
         retries = _as_int(
-            _get(
-                runtime_raw,
-                "retry_attempts",
-                _get(provider, "retry_attempts", DEFAULT_RETRY_ATTEMPTS),
-            ),
+            _get(runtime_raw, "retry_attempts", DEFAULT_RETRY_ATTEMPTS),
             DEFAULT_RETRY_ATTEMPTS,
             minimum=0,
             maximum=10,
         )
-
-        model = str(
-            _get(generation_raw, "model")
-            or _get(provider, "model")
-            or "grok-imagine-video"
-        ).strip() or "grok-imagine-video"
 
         aspect = str(_get(generation_raw, "default_aspect_ratio") or "").strip()
         if aspect.lower() in UNSPECIFIED_TOKENS:
@@ -227,6 +259,15 @@ class ConfigManager:
             minimum=0,
             maximum=MAX_DURATION_SECONDS,
         )
+
+        audio_raw = str(_get(generation_raw, "generate_audio", "")).strip().lower()
+        if audio_raw in ("开启", "on", "true", "1"):
+            audio_mode = "on"
+        elif audio_raw in ("关闭", "off", "false", "0"):
+            audio_mode = "off"
+        else:
+            audio_mode = ""
+
         max_refs = _as_int(
             _get(usage_raw, "max_reference_images", DEFAULT_MAX_REFERENCE_IMAGES),
             DEFAULT_MAX_REFERENCE_IMAGES,
@@ -238,37 +279,7 @@ class ConfigManager:
         if not keywords:
             keywords = list(DEFAULT_NON_RETRYABLE_ERROR_KEYWORDS)
 
-        audio_raw = str(
-            _get(generation_raw, "generate_audio", "")
-        ).strip().lower()
-        if audio_raw in ("开启", "on", "true", "1"):
-            audio_mode = "on"
-        elif audio_raw in ("关闭", "off", "false", "0"):
-            audio_mode = "off"
-        else:
-            audio_mode = ""
-
-        adapter = AdapterConfig(
-            base_url=str(_get(provider, "base_url") or "").strip(),
-            api_key=str(_get(provider, "api_key") or "").strip(),
-            model=model,
-            timeout=timeout,
-            max_retry_attempts=max(1, retries + 1),
-            debug_request_logging=_as_bool(_get(runtime_raw, "debug_request_logging"), False),
-            show_user_error_details=_as_bool(
-                _get(runtime_raw, "show_user_error_details"), True
-            ),
-            non_retryable_status_codes=_as_int_list(
-                _get(runtime_raw, "non_retryable_status_codes"),
-                list(DEFAULT_NON_RETRYABLE_STATUS_CODES),
-            ),
-            non_retryable_error_keywords=keywords,
-            proxy=(str(_get(provider, "proxy") or "").strip() or None),
-            audio_mode=audio_mode,
-        )
-
         generation = GenerationSettings(
-            model=model,
             default_duration=duration,
             default_aspect_ratio=aspect,
             default_resolution=resolution,
@@ -279,12 +290,20 @@ class ConfigManager:
             ),
             max_running_tasks=_as_int(_get(runtime_raw, "max_running_tasks"), 3, 1, 20),
             max_queued_tasks=_as_int(_get(runtime_raw, "max_queued_tasks"), 20, 0, 200),
-            debug_request_logging=adapter.debug_request_logging,
-            show_user_error_details=adapter.show_user_error_details,
-            non_retryable_status_codes=list(adapter.non_retryable_status_codes),
-            non_retryable_error_keywords=list(adapter.non_retryable_error_keywords),
-            result_info_items=_as_str_list(_get(generation_raw, "result_info_items"))
-            or ["模型", "耗时"],
+            debug_request_logging=_as_bool(_get(runtime_raw, "debug_request_logging"), False),
+            show_user_error_details=_as_bool(
+                _get(runtime_raw, "show_user_error_details"), True
+            ),
+            non_retryable_status_codes=_as_int_list(
+                _get(runtime_raw, "non_retryable_status_codes"),
+                list(DEFAULT_NON_RETRYABLE_STATUS_CODES),
+            ),
+            non_retryable_error_keywords=keywords,
+            result_info_items=(
+                ["模型", "耗时"]
+                if _get(generation_raw, "result_info_items", None) is None
+                else _as_str_list(_get(generation_raw, "result_info_items"))
+            ),
             start_task_message_template=str(
                 _get(generation_raw, "start_task_message_template")
                 or DEFAULT_START_TEMPLATE
@@ -308,6 +327,7 @@ class ConfigManager:
                 _get(generation_raw, "text_prompt_enhancement")
                 or DEFAULT_TEXT_PROMPT_ENHANCEMENT
             ),
+            generate_audio=audio_mode,
         )
 
         usage = UsageSettings(
@@ -326,19 +346,112 @@ class ConfigManager:
                 or "❌ 当前会话已被加入黑名单，无法使用视频功能"
             ),
         )
+
         platform = PlatformSettings(
             qq_self_ids=_as_str_list(_get(platform_raw, "qq_self_ids")),
             wechat_self_ids=_as_str_list(_get(platform_raw, "wechat_self_ids")),
         )
-        presets_section = _section(raw, "presets")
-        self._presets = parse_presets(
-            _as_str_list(_get(presets_section, "preset_list"))
-        )
+
+        providers = self._load_providers(_get(raw, "api_providers", []), generation)
+        current = str(_get(raw, "video_model", "") or "").strip()
+        self._active = self._select_provider(providers, current)
+
         return PluginConfig(
-            adapter=adapter,
+            providers=providers,
+            current_model=current,
             usage=usage,
             generation=generation,
             platform=platform,
         )
 
+    def _load_providers(
+        self, raw_items: Any, generation: GenerationSettings
+    ) -> list[ProviderConfig]:
+        """Parse template_list entries into normalized provider configs."""
+        if not isinstance(raw_items, list):
+            if raw_items:
+                logger.warning(f"{LOG} api_providers 配置格式错误，已按空列表处理")
+            return []
+        providers: list[ProviderConfig] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            parsed = self._parse_provider(item, generation)
+            if parsed is not None:
+                providers.append(parsed)
+        return providers
 
+    def _parse_provider(
+        self, item: dict[str, Any], generation: GenerationSettings
+    ) -> ProviderConfig | None:
+        type_str = str(item.get("__template_key") or "").strip()
+        try:
+            provider_type = VideoAdapterType(type_str)
+        except ValueError:
+            logger.warning(f"{LOG} 忽略未知适配器类型: {safe_log_text(type_str)}")
+            return None
+
+        base_url = str(item.get("base_url") or "").strip()
+        if "/v1" in base_url:
+            base_url = base_url.split("/v1", 1)[0]
+
+        capabilities = VideoCapability.NONE
+        for label in _as_str_list(item.get("capability_options", [])):
+            capabilities |= _CAPABILITY_LABELS.get(label.strip(), VideoCapability.NONE)
+        if capabilities is VideoCapability.NONE:
+            capabilities = (
+                VideoCapability.TEXT_TO_VIDEO | VideoCapability.IMAGE_TO_VIDEO
+            )
+
+        # Per-provider overrides: 0/missing falls back to the global runtime value.
+        timeout_raw = item.get("timeout")
+        timeout = (
+            generation.timeout_seconds
+            if timeout_raw in (None, "", 0)
+            else _as_int(timeout_raw, generation.timeout_seconds, 1, MAX_TIMEOUT_SECONDS)
+        )
+        retry_raw = item.get("max_retry_attempts")
+        retries = (
+            generation.retry_attempts
+            if retry_raw in (None, "", 0)
+            else _as_int(retry_raw, generation.retry_attempts, 0, 10)
+        )
+
+        name = str(item.get("name") or "").strip()
+        return ProviderConfig(
+            type=provider_type,
+            name=name,
+            base_url=base_url,
+            api_key=str(item.get("api_key") or "").strip(),
+            available_models=_as_str_list(item.get("available_models", [])),
+            capabilities=capabilities,
+            proxy=str(item.get("proxy") or "").strip() or None,
+            timeout=timeout,
+            max_retry_attempts=max(1, retries + 1),
+            audio_mode=generation.generate_audio,
+            show_user_error_details=generation.show_user_error_details,
+        )
+
+    def _select_provider(
+        self, providers: list[ProviderConfig], current: str
+    ) -> ProviderConfig | None:
+        """Resolve the active provider and its selected model.
+
+        `current` is "供应商名称/模型名称"; falls back to the first provider
+        and its first available model.
+        """
+        if "/" in current:
+            target_name, target_model = current.split("/", 1)
+            for provider in providers:
+                if provider.name == target_name:
+                    return replace(provider, model=target_model)
+        if not providers:
+            logger.warning(f"{LOG} 未找到任何视频供应商配置")
+            return None
+        first = providers[0]
+        model = first.available_models[0] if first.available_models else ""
+        logger.info(
+            f"{LOG} 未匹配到当前线路配置，默认使用: "
+            f"{safe_log_text(first.name)}/{safe_log_text(model)}"
+        )
+        return replace(first, model=model)

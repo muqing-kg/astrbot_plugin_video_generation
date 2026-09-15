@@ -1,46 +1,235 @@
 {
- "provider": {
-  "description": "视频 API 配置",
-  "hint": "支持 OpenAI 风格视频接口网关：grok2api、new-api 等（Grok、Seedance、可灵、Sora 中转）。填写网关地址、客户端密钥与视频模型名。",
-  "type": "object",
-  "items": {
-   "base_url": {
-    "description": "API 地址",
-    "hint": "填写视频 API 根地址，例如 http://host:8000 或 http://host:8000/v1。插件会自动尝试 /v1/videos/generations、/v1/videos、/v1/video/generations。",
-    "type": "string",
-    "default": ""
+ "api_providers": {
+  "type": "template_list",
+  "description": "视频供应商",
+  "hint": "添加一个或多个视频供应商，每个供应商只走自己固定的接口路线。模型选择格式为 供应商名称/模型名称，用 /视频模型 查看、/视频模型 <序号> 切换。",
+  "templates": {
+   "unified_media": {
+    "name": "统一媒体协议接口",
+    "hint": "POST /v1/videos（JSON，mode 声明输入模式）；参考媒体经 /v1/videos/uploads 上传后以 images 数组提交。",
+    "display_item": "name",
+    "hide_hint_in_list": true,
+    "items": {
+     "name": {
+      "description": "供应商名称",
+      "hint": "用于显示与 /视频模型 切换；模型选择格式为 供应商名称/模型名称。",
+      "type": "string",
+      "default": ""
+     },
+     "base_url": {
+      "description": "接口地址",
+      "hint": "填写服务根地址，例如 https://host 或 https://host/v1（自动剥离 /v1）。",
+      "type": "string",
+      "default": ""
+     },
+     "api_key": {
+      "description": "API Key",
+      "hint": "网关客户端密钥，以 Bearer 方式发送。",
+      "type": "string",
+      "default": ""
+     },
+     "available_models": {
+      "description": "可用模型列表",
+      "hint": "用于 /视频模型 切换；按网关实际可用模型维护，例如 seedance-2.5。",
+      "type": "list",
+      "default": []
+     },
+     "capability_options": {
+      "description": "模型能力",
+      "hint": "按线路实际能力勾选；未勾选的能力不会在请求中携带。",
+      "type": "list",
+      "options": [
+       "文生视频",
+       "图生视频",
+       "宽高比",
+       "分辨率",
+       "音频"
+      ],
+      "default": [
+       "文生视频",
+       "图生视频",
+       "宽高比",
+       "分辨率",
+       "音频"
+      ]
+     },
+     "timeout": {
+      "description": "超时时间覆盖（秒）",
+      "hint": "填 0 表示使用运行控制中的超时时间。",
+      "type": "int",
+      "slider": {
+       "min": 0,
+       "max": 1200,
+       "step": 10
+      },
+      "default": 0
+     },
+     "max_retry_attempts": {
+      "description": "重试次数覆盖",
+      "hint": "填 0 表示使用运行控制中的重试次数。",
+      "type": "int",
+      "slider": {
+       "min": 0,
+       "max": 10,
+       "step": 1
+      },
+      "default": 0
+     }
+    }
    },
-   "api_key": {
-    "description": "API Key",
-    "hint": "网关客户端密钥，将以 Bearer 方式发送。",
-    "type": "string",
-    "default": ""
+   "sora": {
+    "name": "Sora 接口",
+    "hint": "POST /v1/videos：文生 JSON，图生 multipart input_reference；seconds 为字符串，size 由比例与分辨率换算。",
+    "display_item": "name",
+    "hide_hint_in_list": true,
+    "items": {
+     "name": {
+      "description": "供应商名称",
+      "hint": "用于显示与 /视频模型 切换；模型选择格式为 供应商名称/模型名称。",
+      "type": "string",
+      "default": ""
+     },
+     "base_url": {
+      "description": "接口地址",
+      "hint": "填写服务根地址，例如 https://host 或 https://host/v1（自动剥离 /v1）。",
+      "type": "string",
+      "default": ""
+     },
+     "api_key": {
+      "description": "API Key",
+      "hint": "网关客户端密钥，以 Bearer 方式发送。",
+      "type": "string",
+      "default": ""
+     },
+     "available_models": {
+      "description": "可用模型列表",
+      "hint": "用于 /视频模型 切换；按网关实际可用模型维护。",
+      "type": "list",
+      "default": []
+     },
+     "capability_options": {
+      "description": "模型能力",
+      "hint": "按线路实际能力勾选；未勾选的能力不会在请求中携带。",
+      "type": "list",
+      "options": [
+       "文生视频",
+       "图生视频",
+       "分辨率"
+      ],
+      "default": [
+       "文生视频",
+       "图生视频",
+       "分辨率"
+      ]
+     },
+     "timeout": {
+      "description": "超时时间覆盖（秒）",
+      "hint": "填 0 表示使用运行控制中的超时时间。",
+      "type": "int",
+      "slider": {
+       "min": 0,
+       "max": 1200,
+       "step": 10
+      },
+      "default": 0
+     },
+     "max_retry_attempts": {
+      "description": "重试次数覆盖",
+      "hint": "填 0 表示使用运行控制中的重试次数。",
+      "type": "int",
+      "slider": {
+       "min": 0,
+       "max": 10,
+       "step": 1
+      },
+      "default": 0
+     }
+    }
    },
-   "model": {
-    "description": "视频模型",
-    "hint": "Grok 推荐 grok-imagine-video、grok-imagine-video-1.5；Seedance 等按网关实际模型名填写，例如 seedance-2.5。",
-    "type": "string",
-    "default": "grok-imagine-video"
-   },
-   "proxy": {
-    "description": "代理地址",
-    "hint": "可选，示例：http://127.0.0.1:7890。",
-    "type": "string",
-    "default": ""
+   "grok": {
+    "name": "Grok 接口",
+    "hint": "POST /v1/videos/generations（JSON）：image 为 {url} 对象形态，duration 为整数。",
+    "display_item": "name",
+    "hide_hint_in_list": true,
+    "items": {
+     "name": {
+      "description": "供应商名称",
+      "hint": "用于显示与 /视频模型 切换；模型选择格式为 供应商名称/模型名称。",
+      "type": "string",
+      "default": ""
+     },
+     "base_url": {
+      "description": "接口地址",
+      "hint": "填写服务根地址，例如 http://host:8000 或 http://host:8000/v1（自动剥离 /v1）。",
+      "type": "string",
+      "default": ""
+     },
+     "api_key": {
+      "description": "API Key",
+      "hint": "网关客户端密钥，以 Bearer 方式发送。",
+      "type": "string",
+      "default": ""
+     },
+     "available_models": {
+      "description": "可用模型列表",
+      "hint": "用于 /视频模型 切换；按网关实际可用模型维护。",
+      "type": "list",
+      "default": []
+     },
+     "capability_options": {
+      "description": "模型能力",
+      "hint": "按线路实际能力勾选；未勾选的能力不会在请求中携带。",
+      "type": "list",
+      "options": [
+       "文生视频",
+       "图生视频",
+       "宽高比",
+       "分辨率"
+      ],
+      "default": [
+       "文生视频",
+       "图生视频",
+       "宽高比",
+       "分辨率"
+      ]
+     },
+     "timeout": {
+      "description": "超时时间覆盖（秒）",
+      "hint": "填 0 表示使用运行控制中的超时时间。",
+      "type": "int",
+      "slider": {
+       "min": 0,
+       "max": 1200,
+       "step": 10
+      },
+      "default": 0
+     },
+     "max_retry_attempts": {
+      "description": "重试次数覆盖",
+      "hint": "填 0 表示使用运行控制中的重试次数。",
+      "type": "int",
+      "slider": {
+       "min": 0,
+       "max": 10,
+       "step": 1
+      },
+      "default": 0
+     }
+    }
    }
   }
  },
+ "video_model": {
+  "description": "当前视频模型",
+  "hint": "格式：供应商名称/模型名称。由 /视频模型 命令查看与切换，无需手动填写。",
+  "type": "string",
+  "default": ""
+ },
  "generation": {
   "description": "生成与结果设置",
-  "hint": "配置默认模型、秒数、比例、分辨率、结果展示和任务开始提示。",
+  "hint": "配置默认秒数、比例、分辨率、音频、结果展示和任务开始提示。模型与地址在「视频供应商」中配置。",
   "type": "object",
   "items": {
-   "model": {
-    "description": "生视频模型",
-    "hint": "可覆盖供应商模型；留空则使用供应商模型。",
-    "type": "string",
-    "default": "grok-imagine-video"
-   },
    "default_duration": {
     "description": "默认秒数",
     "hint": "不指定 时请求不携带秒数字段，由模型使用自己的默认时长；也可填 1~15 的数字。",
@@ -217,7 +406,7 @@
    },
    "max_concurrent_requests": {
     "description": "最大并发生成请求数",
-    "hint": "同时调用 grok2api 的请求上限。",
+    "hint": "同时调用视频接口的请求上限。",
     "type": "int",
     "slider": {
      "min": 1,

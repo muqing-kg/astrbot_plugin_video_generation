@@ -1,22 +1,18 @@
 # 通用视频生成插件
 
-面向 AstrBot 的通用视频生成插件，对接 **OpenAI 风格视频接口网关**（`grok2api`、`new-api` 等），支持 Grok、字节 Seedance 等主流视频模型。
+面向 AstrBot 的通用视频生成插件，内置 **统一媒体协议 / Sora / Grok** 三种接口路线（多实例可并存），支持 Seedance、可灵、Sora、Grok 等主流视频模型。
 
 > 不是火山方舟（Ark）等原生 API 的直连客户端；Seedance 等模型请经 new-api 等网关使用。
 
 ## 功能
 
 - 文生视频 / 图生视频
+- **多供应商多模型**：按模板添加多个供应商实例（统一媒体协议 / Sora / Grok 三种接口路线），每个实例可配多个模型，`/视频模型` 一键切换
+- 每个供应商只走自己**固定的接口路线**，不探测、不猜测、行为确定
 - 命令参数与提示词内自动识别秒数、比例
 - 默认：`6s`；比例与分辨率默认**不指定**（请求不携带，由网关决定）
-- 自定义视频网关 `base_url` / `api_key` / `model`
-- 自动适配网关字段差异（`image` 对象/字符串、`aspect_ratio`/`ratio`、`duration`/`seconds`），依据上游 400 校验反馈改写请求并重试
-- URL 支持：
-  - `http://host:8000`
-  - `http://host:8000/v1`
-  - `http://host:8000/v1/videos/generations`
 - 任务开始提示、任务查询/取消
-- 超时/重试/并发/排队
+- 超时/重试/并发/排队（每个供应商可覆盖）
 - 黑白名单、速率限制、每日额度
 - 可选任务历史持久化
 
@@ -27,6 +23,8 @@
 | `/视频 [提示词]` | 文生/图生视频（有图则图生） |
 | `/视频 [秒数] [比例] [分辨率] [提示词]` | 三个参数开头**任意顺序**固定写，如 `/视频 720p 9:16 6s 城市夜景` |
 | `/视频 <预设名...> [额外提示词]` | 使用预设提示词生成，可叠加多个预设 |
+| `/视频模型` | 查看所有 供应商/模型 线路 |
+| `/视频模型 <序号或线路>` | 切换当前视频线路 |
 | `/视频任务` | 查看进行中任务 |
 | `/视频任务 <编号或任务ID>` | 查看详情 |
 | `/视频取消 <编号或任务ID>` | 取消任务 |
@@ -70,17 +68,19 @@
 - 超时最大：`1200` 秒（20 分钟）
 - 参考图默认最多 `1` 张（可配到 8；多图是否生效取决于模型，不支持自动回落首图）
 
-## 推荐模型
+## 模型名怎么填
 
-- Grok：`grok-imagine-video`、`grok-imagine-video-1.5`
-- Seedance（经 new-api 等网关）：按网关模型名填写，例如 `seedance-2.5`
+- 以网关的模型页或 `/v1/media/capabilities/videos` 能力返回为准，例如 `seedance-2.5`、`seedance-2.0-mini`
+- 模型名填在**供应商实例**的「可用模型列表」里，`/视频模型` 按"供应商/模型"切换
 
 ## 配置
 
-1. **供应商配置**
-   - API 地址：grok2api 地址
-   - API Key：grok2api 客户端密钥
-   - 模型：Grok 视频模型
+1. **视频供应商**（可添加多个实例，每个选择一种接口路线）
+   - 接口路线：`统一媒体协议` / `Sora` / `Grok`，每条路线固定自己的请求格式
+   - 名称 / 接口地址 / API Key：供应商身份
+   - 可用模型列表：多模型填多个，`/视频模型` 切换
+   - 模型能力勾选：未勾选的能力不会在请求中携带
+   - 超时 / 重试覆盖：填 0 使用「运行控制」全局值
 2. **生成与结果设置**
 3. **运行控制**（超时最大 1200）
 4. **使用限制**
@@ -94,34 +94,15 @@
 
 ## 上游接口
 
-```http
-POST {base}/v1/videos/generations
-Authorization: Bearer <api_key>
-```
+各接口路线的请求格式在添加供应商时即已确定，不探测、不改写、不回落：
 
-```json
-{
-  "model": "grok-imagine-video",
-  "prompt": "一只猫在海边奔跑",
-  "duration": 6,
-  "aspect_ratio": "16:9",
-  "resolution": "720p",
-  "image": {"url": "https://..."}
-}
-```
+| 路线 | 创建 | 图片参考 | 时长/比例 |
+|---|---|---|---|
+| 统一媒体协议 | `POST /v1/videos`（JSON，带 `mode`） | `POST /v1/videos/uploads` 上传 → `images` 数组 | `duration` / `aspect_ratio` / `resolution` / `audio` |
+| Sora | `POST /v1/videos` | 有图 multipart `input_reference`，无图 JSON | `seconds` 字符串 / `size`（比例+分辨率换算） |
+| Grok | `POST /v1/videos/generations` | `image: {"url": ...}` 对象 | `duration` / `aspect_ratio` / `resolution` |
 
-然后轮询：
-
-```http
-GET {base}/v1/videos/{request_id}
-GET {base}/v1/videos/{request_id}/content
-```
-
-创建路径自动按序尝试：`/v1/videos/generations`（grok2api）、`/v1/videos`（OpenAI/Sora 风格）、`/v1/video/generations`（new-api 风格）。轮询同时识别 `status` / `task_status` / `state` 字段。
-
-不同网关对字段形态的要求不一致（例如 Seedance 网关要求 `image` 为字符串，grok2api 要求 `{"url": ...}` 对象）。插件遇到 400/422 字段校验报错时，会解析错误中点名的字段并自动改写请求重试：`image` 对象⇄字符串、`aspect_ratio`→`ratio`、`duration`→`seconds`、类型不匹配时自动转换、值不被支持时剔除该字段回落模型默认，无需手动配置。
-
-**统一媒体协议网关自动适配：请求自动携带 `mode`（`text-to-video` / `image-to-video`），网关不认的额外字段按报错自动剔除并记忆（后续请求不再携带）。图生参考媒体遇到"base64 不被接受 / 参考格式不支持"类报错时，自动通过网关的 `POST /v1/videos/uploads` 上传换取受保护 URL（24 小时有效），以 `images` 数组重试——因此微信图、引用图、本地截图都可直接使用。若网关没有上传接口（如 OpenAI 官方），自动回落 Sora 的 multipart `input_reference` 表单。
+轮询统一为 `GET /v1/videos/{task_id}`（兼容 `status` / `task_status` / `state` 字段），结果经 `GET /v1/videos/{task_id}/content` 下载。
 
 ## QQ 视频发送说明
 
@@ -134,7 +115,7 @@ QQ（aiocqhttp/NapCat）下，插件按以下顺序尝试发送视频：
 
 因此若 QQ 收到的是文件而非可播放视频，默认无需额外配置：base64 内联会优先尝试。若 base64 因超过 50MB 被跳过，再考虑配置 AstrBot 全局 `callback_api_base`（形如 `http://<AstrBot主机>:<端口>`），并确保 NapCat 能访问该地址。插件日志会打印实际发送的组件类型（`type=Video` 或 `type=File`）与失败原因。
 
-发送前会先剥离 Grok/xAI MP4 常见的顶层 C2PA `uuid` 等非必要 box（无需 ffmpeg）。可选：主机安装 `ffmpeg` 后，会再以 `-map_metadata -1` remux `+faststart` 或转码 H.264+AAC，进一步清掉 moov 元数据，提升 NT 可播放气泡成功率。
+发送前会先剥离部分模型输出的 MP4 顶层 C2PA `uuid` 等非必要 box（无需 ffmpeg）。可选：主机安装 `ffmpeg` 后，会再以 `-map_metadata -1` remux `+faststart` 或转码 H.264+AAC，进一步清掉 moov 元数据，提升 NT 可播放气泡成功率。
 
 ## 平台判定（QQ / 微信 / 其他）
 
@@ -155,7 +136,7 @@ QQ 与微信可能同时挂在同一个 aiocqhttp 适配器下，且 AstrBot 平
 
 1. 放入 AstrBot 插件目录
 2. 依赖：`aiohttp>=3.9.0`
-3. 填写 grok2api 地址与客户端密钥
+3. 填写视频网关地址与客户端密钥
 4. 重载后使用 `/视频 ...`
 
 ## 注意
