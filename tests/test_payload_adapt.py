@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.adapters.payload_adapt import adapt_payload
+from core.adapters.payload_adapt import adapt_payload, aspect_to_size
 
 BASE = {
     "model": "seedance-2.5",
@@ -84,4 +84,20 @@ assert adapt_payload(dict(BASE), "Invalid API key provided") is None
 # Case 14: droppable field word but no constraint keyword -> untouched.
 assert adapt_payload(dict(BASE), "quota exceeded for resolution this month") is None
 
-print("payload_adapt self-check: all 14 cases passed")
+# Case 15: Sora-style size dropped when the upstream rejects its value.
+payload = dict(BASE)
+payload["size"] = "1680x720"
+out = adapt_payload(payload, "unsupported size value for this model")
+assert out is not None and "size" not in out and "aspect_ratio" in out, out
+
+# --- aspect_to_size (Sora-style WxH mapping) ---
+assert aspect_to_size("16:9", "720p") == "1280x720"
+assert aspect_to_size("9:16", "720p") == "720x1280"
+assert aspect_to_size("1:1", "720p") == "720x720"
+assert aspect_to_size("21:9", "1080p") == "2520x1080"
+assert aspect_to_size("4:3", "480p") == "640x480"
+assert aspect_to_size("", "720p") is None
+assert aspect_to_size("abc", "720p") is None
+assert aspect_to_size("0:9", "720p") is None
+
+print("payload_adapt self-check: all adapt + size cases passed")

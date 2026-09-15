@@ -16,7 +16,7 @@ from ..generation.reference import image_to_data_url
 from ..shared.constants import POLL_INTERVAL_SECONDS, UNSPECIFIED_TOKENS
 from ..shared.logging import log_prefix, safe_log_text
 from ..shared.types import AdapterConfig, ImageData, VideoRequest, VideoResult
-from .payload_adapt import adapt_payload
+from .payload_adapt import adapt_payload, aspect_to_size
 
 LOG = log_prefix("Adapter")
 API_STATUS_RE = re.compile(r"API 错误\s*\((\d{3})\)")
@@ -34,6 +34,9 @@ class VideoAPIAdapter:
     def __init__(self, config: AdapterConfig):
         self.config = config
         self._session: aiohttp.ClientSession | None = None
+        # Fields the upstream explicitly rejected (unknown/unsupported value);
+        # remembered so later payloads omit them without another roundtrip.
+        self._unsupported_fields: set[str] = set()
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
@@ -150,8 +153,10 @@ class VideoAPIAdapter:
                 ordered.append(item)
         return ordered
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    def _headers(self, *, json_body: bool = True) -> dict[str, str]:
+        headers: dict[str, str] = {"Accept": "application/json"}
+        if json_body:
+            headers["Content-Type"] = "application/json"
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
         return headers
@@ -171,21 +176,96 @@ class VideoAPIAdapter:
             return image.source_url
         return image_to_data_url(image)
 
+    def _build_multipart_payload(
+        self, payload: dict[str, Any], image: ImageData
+    ) -> aiohttp.FormData:
+        """Build the Sora-style multipart create form.
+
+        Fields are sourced from the (possibly adapted) payload dict so that
+        later adapt rules (drop/convert) also apply to the multipart retry.
+        The image travels as the `input_reference` file part; aiohttp sets the
+        multipart Content-Type with boundary, so no manual Content-Type.
+        """
+        form = aiohttp.FormData()
+        form.add_field("model", str(payload.get("model") or self.config.model))
+        form.add_field("prompt", str(payload.get("prompt") or ""))
+        seconds_value = payload.get("duration", payload.get("seconds"))
+        if seconds_value:
+            try:
+                form.add_field("seconds", str(int(seconds_value)))
+            except (TypeError, ValueError):
+                form.add_field("seconds", str(seconds_value))
+        size = aspect_to_size(
+            str(payload.get("aspect_ratio") or ""), str(payload.get("resolution") or "")
+        )
+        if size:
+            form.add_field("size", size)
+        mime = (image.mime_type or "").split(";")[0].strip().lower()
+        ext = ".png"
+        if mime in ("image/jpeg", "image/jpg"):
+            ext = ".jpg"
+        elif mime == "image/gif":
+            ext = ".gif"
+        elif mime == "image/webp":
+            ext = ".webp"
+        form.add_field(
+            "input_reference",
+            image.data,
+            filename=f"reference{ext}",
+            content_type=mime or "image/png",
+        )
+        return form
+
     def _build_payload(self, request: VideoRequest) -> dict[str, Any]:
         """Build a video create body for OpenAI-style video gateways.
 
-        grok2api rejects unknown fields (DisallowUnknownFields), so do NOT send
-        OpenAI-only aliases like seconds / input_reference. Unspecified params
-        ("不指定"/0/empty) are omitted so the model applies its own defaults.
-        `image` is sent as an object first (grok2api form); gateways that
-        require a plain string are corrected by adapt_payload from the upstream
-        400 feedback. Extra reference images go into `image_urls`; gateways
-        that reject the field are handled by the adapt drop rule (first image
-        still applies via `image`).
+        grok2api rejects unknown fields (DisallowUnknownFields), so extra
+        convenience fields are omitted once the upstream has rejected them.
+        `mode` declares the input style for unified-media gateways; strict gateways drop it via the adapt rules on first contact.
+        Unspecified params ("不指定"/0/empty) are omitted so the model applies
+        its own defaults. `image` is sent as an object first (grok2api form);
+        gateways that require other shapes are corrected by the adapt rules
+        from upstream 400 feedback.
         """
         payload: dict[str, Any] = {
             "model": request.model or self.config.model,
+            "mode": "image-to-video" if request.images else "text-to-video",
             "prompt": request.prompt,
+        }
+        if (
+            request.duration
+            and request.duration > 0
+            and "duration" not in self._unsupported_fields
+        ):
+            payload["duration"] = int(request.duration)
+        if (
+            (request.aspect_ratio or "").lower() not in UNSPECIFIED_TOKENS
+            and "aspect_ratio" not in self._unsupported_fields
+        ):
+            payload["aspect_ratio"] = request.aspect_ratio
+        if (
+            (request.resolution or "").lower() not in UNSPECIFIED_TOKENS
+            and "resolution" not in self._unsupported_fields
+        ):
+            payload["resolution"] = request.resolution
+        if request.images and "image" not in self._unsupported_fields:
+            payload["image"] = {"url": self._image_ref(request.images[0])}
+            if len(request.images) > 1 and "images" not in self._unsupported_fields:
+                payload["image_urls"] = [
+                    self._image_ref(image) for image in request.images
+                ]
+        return payload
+
+    def _build_media_payload(
+        self, request: VideoRequest, urls: list[str]
+    ) -> dict[str, Any]:
+        """Unified-media create body: uploaded URLs in
+        an `images` array plus an explicit `mode`."""
+        payload: dict[str, Any] = {
+            "model": request.model or self.config.model,
+            "mode": "image-to-video",
+            "prompt": request.prompt,
+            "images": urls,
         }
         if request.duration and request.duration > 0:
             payload["duration"] = int(request.duration)
@@ -193,13 +273,70 @@ class VideoAPIAdapter:
             payload["aspect_ratio"] = request.aspect_ratio
         if (request.resolution or "").lower() not in UNSPECIFIED_TOKENS:
             payload["resolution"] = request.resolution
-        if request.images:
-            payload["image"] = {"url": self._image_ref(request.images[0])}
-            if len(request.images) > 1:
-                payload["image_urls"] = [
-                    self._image_ref(image) for image in request.images
-                ]
         return payload
+
+    async def _upload_reference_media(
+        self, images: list[ImageData]
+    ) -> list[str] | None:
+        """Upload reference images to the gateway's media upload endpoint
+        (POST /v1/videos/uploads) and return the protected URLs.
+
+        Returns None when the endpoint is unavailable (e.g. real OpenAI), so
+        the caller can fall back to the multipart form.
+        """
+        session = self._session_get()
+        prefix = log_prefix("Adapter")
+        upload_url = f"{self._root_base().rstrip('/')}/v1/videos/uploads"
+        timeout = aiohttp.ClientTimeout(total=min(300, max(60, self.config.timeout)))
+        urls: list[str] = []
+        for index, image in enumerate(images):
+            mime = (image.mime_type or "").split(";")[0].strip().lower() or "image/png"
+            ext = ".png"
+            if mime in ("image/jpeg", "image/jpg"):
+                ext = ".jpg"
+            elif mime == "image/gif":
+                ext = ".gif"
+            elif mime == "image/webp":
+                ext = ".webp"
+            form = aiohttp.FormData()
+            form.add_field(
+                "file",
+                image.data,
+                filename=f"reference{index}{ext}",
+                content_type=mime,
+            )
+            try:
+                async with session.post(
+                    upload_url,
+                    data=form,
+                    headers=self._headers(json_body=False),
+                    proxy=self.config.proxy,
+                    timeout=timeout,
+                ) as resp:
+                    text = await resp.text()
+                    if resp.status in {404, 405}:
+                        logger.info(f"{prefix} 网关无媒体上传接口 ({resp.status})")
+                        return None
+                    if resp.status >= 400:
+                        logger.warning(
+                            f"{prefix} 参考媒体上传失败 status={resp.status} "
+                            f"body={safe_log_text(text, 160)}"
+                        )
+                        return None
+                    data = await self._safe_json(resp, text)
+                    url = self._extract_video_url(data)
+                    if not url and text.strip().startswith(("http://", "https://")):
+                        url = text.strip()
+                    if not url:
+                        logger.warning(
+                            f"{prefix} 上传响应缺少 URL: {safe_log_text(text, 160)}"
+                        )
+                        return None
+                    urls.append(url)
+            except Exception as exc:
+                logger.warning(f"{prefix} 参考媒体上传异常: {safe_log_text(exc)}")
+                return None
+        return urls
 
     async def generate(self, request: VideoRequest, *, should_cancel=None) -> VideoResult:
         if not self.config.api_key:
@@ -243,6 +380,8 @@ class VideoAPIAdapter:
         last_create_error = "创建视频任务失败"
         create_data: dict[str, Any] | None = None
         used_create_url = ""
+        use_media_variant = False
+        use_multipart = False
 
         try:
             for create_url in create_urls:
@@ -251,14 +390,21 @@ class VideoAPIAdapter:
                 if self.config.debug_request_logging:
                     logger.debug(
                         f"{prefix} 尝试创建视频 url={create_url} model={payload.get('model')} "
-                        f"duration={payload.get('duration')} images={len(request.images)}"
+                        f"duration={payload.get('duration')} images={len(request.images)} "
+                        f"media={use_media_variant} multipart={use_multipart}"
                     )
+                if use_multipart and request.images:
+                    post_kwargs: dict[str, Any] = dict(
+                        data=self._build_multipart_payload(payload, request.images[0]),
+                        headers=self._headers(json_body=False),
+                    )
+                else:
+                    post_kwargs = dict(json=payload, headers=self._headers())
                 async with session.post(
                     create_url,
-                    json=payload,
-                    headers=self._headers(),
                     proxy=self.config.proxy,
                     timeout=timeout,
+                    **post_kwargs,
                 ) as resp:
                     text = await resp.text()
                     if resp.status >= 400:
@@ -269,12 +415,51 @@ class VideoAPIAdapter:
                                 f"{prefix} 创建路径不可用 ({resp.status}): {create_url}"
                             )
                             continue
+                        # Unified-media gateways reject base64 /
+                        # JSON-shaped image references: upload the media to
+                        # /v1/videos/uploads and retry with an `images` array.
+                        body_lower = text.lower()
+                        if (
+                            resp.status in {400, 422}
+                            and not use_media_variant
+                            and request.images
+                            and (
+                                "input_reference" in body_lower
+                                or "multipart" in body_lower
+                                or "unsupported_reference_format" in body_lower
+                                or ("base64" in body_lower and "not allowed" in body_lower)
+                            )
+                        ):
+                            use_media_variant = True
+                            uploaded_urls = await self._upload_reference_media(
+                                request.images
+                            )
+                            if uploaded_urls:
+                                payload = self._build_media_payload(
+                                    request, uploaded_urls
+                                )
+                                logger.warning(
+                                    f"{prefix} 参考媒体已上传，切换 images 数组格式重试: {create_url}"
+                                )
+                                continue
+                            # Upload endpoint unavailable (e.g. real OpenAI):
+                            # fall back to the Sora multipart form.
+                            use_multipart = True
+                            logger.warning(
+                                f"{prefix} 媒体上传接口不可用，切换 multipart 表单重试: {create_url}"
+                            )
+                            continue
                         # Field-shape feedback (e.g. image object vs string):
                         # mutate the payload and retry the same create URL.
                         if resp.status in {400, 422} and adapt_budget > 0:
                             adapted = adapt_payload(payload, text)
                             if adapted is not None:
                                 adapt_budget -= 1
+                                # Remember removed fields so later payloads
+                                # (incl. fresh outer retries) omit them.
+                                self._unsupported_fields.update(
+                                    set(payload) - set(adapted)
+                                )
                                 logger.warning(
                                     f"{prefix} 按上游校验反馈调整请求字段后重试: {create_url}"
                                 )

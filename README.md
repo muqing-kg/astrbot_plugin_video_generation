@@ -116,9 +116,11 @@ GET {base}/v1/videos/{request_id}
 GET {base}/v1/videos/{request_id}/content
 ```
 
-创建路径自动按序尝试：`/v1/videos/generations`（grok2api）、`/v1/videos`（OpenAI 风格）、`/v1/video/generations`（new-api 风格）。轮询同时识别 `status` / `task_status` / `state` 字段。
+创建路径自动按序尝试：`/v1/videos/generations`（grok2api）、`/v1/videos`（OpenAI/Sora 风格）、`/v1/video/generations`（new-api 风格）。轮询同时识别 `status` / `task_status` / `state` 字段。
 
-不同网关对字段形态的要求不一致（例如 Seedance 网关要求 `image` 为字符串，grok2api 要求 `{"url": ...}` 对象）。插件遇到 400/422 字段校验报错时，会解析错误中点名的字段并自动改写请求重试：`image` 对象⇄字符串、`aspect_ratio`→`ratio`、`duration`→`seconds`、类型不匹配时自动转换，无需手动配置。
+不同网关对字段形态的要求不一致（例如 Seedance 网关要求 `image` 为字符串，grok2api 要求 `{"url": ...}` 对象）。插件遇到 400/422 字段校验报错时，会解析错误中点名的字段并自动改写请求重试：`image` 对象⇄字符串、`aspect_ratio`→`ratio`、`duration`→`seconds`、类型不匹配时自动转换、值不被支持时剔除该字段回落模型默认，无需手动配置。
+
+**统一媒体协议网关自动适配：请求自动携带 `mode`（`text-to-video` / `image-to-video`），网关不认的额外字段按报错自动剔除并记忆（后续请求不再携带）。图生参考媒体遇到"base64 不被接受 / 参考格式不支持"类报错时，自动通过网关的 `POST /v1/videos/uploads` 上传换取受保护 URL（24 小时有效），以 `images` 数组重试——因此微信图、引用图、本地截图都可直接使用。若网关没有上传接口（如 OpenAI 官方），自动回落 Sora 的 multipart `input_reference` 表单。
 
 ## QQ 视频发送说明
 
