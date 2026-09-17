@@ -159,6 +159,7 @@ class VideoAdapterBase:
 
             data: dict | None = None
             active_status_url = status_list[0]
+            session = self._session_get()
             for status_url in status_list:
                 try:
                     async with session.get(
