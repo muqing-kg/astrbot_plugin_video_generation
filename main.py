@@ -7,7 +7,6 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -29,7 +28,7 @@ from .core.generation.presets import combine_prompt, match_presets, parse_preset
 from .core.generation.prompt import build_enhanced_video_prompt
 from .core.generation.reference import collect_event_images, detect_image_aspect_ratio
 from .core.shared.logging import log_prefix, safe_log_text
-from .core.shared.sendplan import build_video_candidates
+from .core.shared.sendplan import build_video_component
 from .core.shared.types import VideoRequest
 from .core.tasks.ids import new_task_id
 from .core.tasks.manager import TaskManager
@@ -42,7 +41,7 @@ LOG = log_prefix("Plugin")
     "astrbot_plugin_video_generation",
     "沐倾",
     "通用视频生成插件",
-    "v0.5.2",
+    "v0.5.3",
 )
 class VideoGenerationPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -274,18 +273,6 @@ class VideoGenerationPlugin(Star):
     def _is_qq_platform(self, event: AstrMessageEvent) -> bool:
         return self._platform_kind(event) == "qq"
 
-    def _build_video_candidates(
-        self, comp: Any, path_obj: Path, result_url: str, *, allow_inline: bool
-    ) -> list[Any]:
-        """Ordered components that each carry the video itself (no image/voice proxy)."""
-        return build_video_candidates(
-            comp,
-            path_obj,
-            result_url,
-            callback_configured=self._callback_api_base_configured(),
-            allow_inline=allow_inline,
-        )
-
     @staticmethod
     def _callback_api_base_configured() -> bool:
         """True when AstrBot global callback_api_base is set, so Video.to_dict()
@@ -297,31 +284,6 @@ class VideoGenerationPlugin(Star):
             return bool(astrbot_config.get("callback_api_base"))
         except Exception:
             return False
-
-
-
-    async def _register_video_callback_url(self, path_obj: Path) -> str:
-        """Register local video to AstrBot file callback if available."""
-        try:
-            import astrbot.api.message_components as Comp
-
-            video_cls = getattr(Comp, "Video", None)
-            if video_cls is None or not callable(
-                getattr(video_cls, "fromFileSystem", None)
-            ):
-                return ""
-            if not self._callback_api_base_configured():
-                return ""
-            video = video_cls.fromFileSystem(str(path_obj.resolve(strict=False)))
-            if not callable(getattr(video, "register_to_file_service", None)):
-                return ""
-            url = await video.register_to_file_service()
-            return str(url or "")
-        except Exception as exc:
-            logger.warning(
-                f"{LOG} 注册视频回调 URL 失败: {safe_log_text(exc, 160)}"
-            )
-            return ""
 
     @staticmethod
     def _iter_mp4_boxes(data: bytes, start: int = 0, end: int | None = None):
@@ -453,8 +415,8 @@ class VideoGenerationPlugin(Star):
 
         Used by BOTH the QQ and WeChat branches: bridges reject model MP4s with
         C2PA uuid boxes / fat metadata regardless of platform. Returns
-        (send_path, sanitized_ok); sanitized_ok=False when local cleaning failed,
-        in which case callers should avoid raw-base64 Video candidates.
+        (send_path, sanitized_ok); sanitized_ok is informational only — hygiene
+        is best-effort and the single send form proceeds either way.
 
         Steps:
         1) sanitize to `*_qqstrip.mp4` (C2PA uuid -> same-size free; no ffmpeg)
@@ -566,121 +528,84 @@ class VideoGenerationPlugin(Star):
         event: AstrMessageEvent,
         *,
         result_path: str,
-        result_url: str,
         info: str,
-        task_id: str,
     ) -> bool:
-        """Send generated video with multiple platform fallbacks.
+        """Hand the finished video to the platform adapter, once, in the single
+        proven form per platform.
 
-        Returns True when a non-text video/file component is sent.
+        结果语义：组件交给桥之后，桥返回错误才向群里报告失败（错误原样透传）；
+        无错误则插件静默。仅插件自身问题（无可用形态/文件缺失/组件库异常）
+        同样说明原因。Returns True when the component was handed off.
         """
-        errors: list[str] = []
         path_obj = Path(result_path) if result_path else None
         has_local = bool(
             path_obj and path_obj.exists() and path_obj.is_file() and path_obj.stat().st_size > 0
         )
-        if result_path and not has_local:
+
+        if not has_local:
             logger.warning(f"{LOG} 本地视频不存在或为空: {result_path}")
+            await self._send_text(event, "❌ 视频未能发出（插件侧原因）：本地视频文件缺失")
+            return False
 
-        if has_local:
-            try:
-                import astrbot.api.message_components as Comp
+        try:
+            import astrbot.api.message_components as Comp
+        except Exception as exc:
+            logger.warning(f"{LOG} 组件库导入失败: {safe_log_text(exc, 160)}")
+            await self._send_text(
+                event, f"❌ 视频未能发出（插件侧原因）：消息组件库导入失败 {safe_log_text(exc, 120)}"
+            )
+            return False
 
-                is_qq = self._is_qq_platform(event)
-                plain_cls = getattr(Comp, "Plain", None)
-                # Both platforms get the same MP4 hygiene: C2PA uuid / fat metadata
-                # make bridges answer 内容无效 regardless of platform.
-                send_path, sanitized_ok = await self._prepare_playable_mp4(path_obj)
-                candidates = self._build_video_candidates(
-                    Comp, send_path, result_url, allow_inline=sanitized_ok
+        is_qq = self._is_qq_platform(event)
+        plain_cls = getattr(Comp, "Plain", None)
+        # 桥对带 C2PA uuid / 冗余元数据的 MP4 一律拒收，两平台统一先清洗
+        send_path, _sanitized = await self._prepare_playable_mp4(path_obj)
+        component, form = build_video_component(
+            Comp,
+            send_path,
+            callback_configured=self._callback_api_base_configured(),
+            is_qq=is_qq,
+        )
+        if component is None:
+            logger.warning(f"{LOG} 无可用视频发送形态: {form}")
+            await self._send_text(event, f"❌ 视频未能发出（插件侧原因）：{form}")
+            return False
+
+        try:
+            if is_qq:
+                await self.context.send_message(
+                    event.unified_msg_origin,
+                    MessageChain(chain=[component]),
                 )
-
-                # QQ: prefer callback HTTP URL for Video when available. This avoids
-                # base64:// + callback_api_base FileNotFoundError and helps remote NapCat.
-                # WeChat needs no pre-registration: Video.to_dict() auto-registers local
-                # files when callback_api_base is set, and inline base64 is skipped in
-                # that case, so the bridge always receives bytes or a fetchable URL.
-                if is_qq:
-                    callback_url = await self._register_video_callback_url(send_path)
-                    video_cls = getattr(Comp, "Video", None)
-                    if callback_url and video_cls is not None:
-                        if callable(getattr(video_cls, "fromURL", None)):
-                            try:
-                                candidates.insert(0, video_cls.fromURL(callback_url))
-                            except Exception as exc:
-                                errors.append(
-                                    f"VideoCallback:{safe_log_text(exc, 120)}"
-                                )
-
-                for component in candidates:
+                if info and plain_cls is not None:
                     try:
-                        if is_qq:
-                            await self.context.send_message(
-                                event.unified_msg_origin,
-                                MessageChain(chain=[component]),
-                            )
-                            if info and plain_cls is not None:
-                                try:
-                                    await self._send_text(event, info)
-                                except Exception as exc:
-                                    logger.warning(
-                                        f"{LOG} 视频已发送，但附加信息发送失败: {safe_log_text(exc, 120)}"
-                                    )
-                        else:
-                            chain_list = [component]
-                            if info and plain_cls is not None:
-                                chain_list.append(plain_cls(info))
-                            await self.context.send_message(
-                                event.unified_msg_origin,
-                                MessageChain(chain=chain_list),
-                            )
-                        comp_type = type(component).__name__
-                        if comp_type == "File":
-                            logger.warning(
-                                f"{LOG} 仅以 File 附件送达（非可播放视频气泡）: path={send_path.name} "
-                                f"errors={'; '.join(errors) if errors else 'none'}"
-                            )
-                        else:
-                            logger.info(
-                                f"{LOG} 已通过组件发送本地视频: type={comp_type} path={send_path.name} "
-                                f"platform={self._platform_kind(event)}"
-                            )
-                        return True
+                        await self._send_text(event, info)
                     except Exception as exc:
-                        err = f"{type(component).__name__}:{safe_log_text(exc, 200)}"
-                        errors.append(err)
                         logger.warning(
-                            f"{LOG} 候选组件发送失败: type={type(component).__name__} "
-                            f"platform={self._platform_kind(event)} err={safe_log_text(exc, 200)}"
+                            f"{LOG} 视频已交给平台，但附加信息发送失败: {safe_log_text(exc, 120)}"
                         )
-            except Exception as exc:
-                errors.append(f"CompImport:{safe_log_text(exc, 120)}")
-                logger.warning(f"{LOG} 组件发送初始化失败: {safe_log_text(exc, 160)}")
-
-        if result_url:
-            text_msg = f"✅ 视频已生成\n{result_url}"
-            if info:
-                text_msg += f"\n{info}"
-            if errors:
-                logger.warning(
-                    f"{LOG} 本地视频发送失败，降级为URL: {'; '.join(errors)}"
+            else:
+                chain_list = [component]
+                if info and plain_cls is not None:
+                    chain_list.append(plain_cls(info))
+                await self.context.send_message(
+                    event.unified_msg_origin,
+                    MessageChain(chain=chain_list),
                 )
-            await self._send_text(event, text_msg)
+        except Exception as exc:
+            # 交付后桥返回了错误：如实转述一次，不重试、不换形态、不解读
+            reason = safe_log_text(str(exc), 200)
+            logger.warning(
+                f"{LOG} 桥返回错误: form={form} platform={self._platform_kind(event)} err={reason}"
+            )
+            await self._send_text(event, f"❌ 视频发送失败：{reason}")
             return False
 
-        if has_local:
-            text_msg = f"✅ 视频已生成\n文件: {path_obj}"
-            if info:
-                text_msg += f"\n{info}"
-            if errors:
-                logger.warning(
-                    f"{LOG} 本地视频发送失败，降级为路径文本: {'; '.join(errors)}"
-                )
-            await self._send_text(event, text_msg)
-            return False
-
-        await self._send_text(event, f"❌ 视频完成但没有可发送内容 [{task_id}]")
-        return False
+        logger.info(
+            f"{LOG} 已将视频交给平台适配器: form={form} path={send_path.name} "
+            f"platform={self._platform_kind(event)}"
+        )
+        return True
 
     def _maybe_delete_local_video(self, result_path: str) -> None:
         """Delete local temp video after successful send when enabled."""
@@ -1108,17 +1033,11 @@ class VideoGenerationPlugin(Star):
         info = format_result_info(latest, self.config_manager.generation.result_info_items)
 
         try:
-            sent_as_media = await self._send_video_result(
+            await self._send_video_result(
                 event,
                 result_path=result_path,
-                result_url=result.video_url or "",
                 info=info,
-                task_id=record.task_id,
             )
-            if not sent_as_media:
-                logger.warning(
-                    f"{LOG} 任务 {record.task_id} 未通过视频/文件组件发送，已使用文本降级"
-                )
             self._maybe_delete_local_video(result_path)
             if self.config_manager.generation.auto_delete_after_send and result_path:
                 self.task_manager.update(record.task_id, result_path="")

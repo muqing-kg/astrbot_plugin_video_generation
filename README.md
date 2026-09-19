@@ -104,31 +104,36 @@
 
 轮询统一为 `GET /v1/videos/{task_id}`（兼容 `status` / `task_status` / `state` 字段），结果经 `GET /v1/videos/{task_id}/content` 下载。
 
-## QQ 视频发送说明
+## 视频发送形态（QQ / 微信，每平台唯一）
 
-QQ（aiocqhttp/NapCat）与微信共用同一条「真视频」候选链（`core/shared/sendplan.py`），每个候选要么内嵌视频字节、要么指向桥接端可拉取的 URL，绝无把视频伪装成图片/语音的降级：
+插件不做多候选降级：每次任务只构建**一个**经过实证的视频组件，交给平台适配器，发一次。绝无把视频伪装成图片/语音的降级，也绝无重复投递。
 
-1. **base64 内联 Video**（零配置，默认路径）：将视频以 `base64://` 直传桥接端（NapCat 或微信桥），由其对端解码到自身临时目录后上传，不依赖文件系统互通，也不依赖任何全局配置。仅当未配置 AstrBot 全局 `callback_api_base` 时启用；文件超过 50MB 时跳过（OneBot 报文膨胀约 1/3）。
-2. **AstrBot 文件回调 URL**（需配置 AstrBot 全局 `callback_api_base`）：注册本地视频为可访问 HTTP URL，桥接端可直接下载播放，跨机部署也适用。配置了 `callback_api_base` 时此项优先、base64 自动跳过（两者组合会触发 FileNotFoundError）。微信链路无需额外注册——`Video.to_dict()` 会自动把本地文件注册成回调 URL。
-3. **本地文件路径**（`file:///` 或绝对路径）：要求 AstrBot 与桥接端同机，文件系统互通。
-4. **`File` 附件兜底**：仅当上述 Video 全部失败时才发送文件附件（显示为文件卡片，非播放气泡）。
+| 部署状态 | 唯一形态 |
+|---|---|
+| 已配置 AstrBot 全局 `callback_api_base`（QQ 与微信通用，推荐） | 本地路径 Video：`Video.to_dict()` 自动注册为 `http://<callback>/api/file/<token>`，桥接端自行下载后以视频气泡发出 |
+| 未配置回调 + QQ（NapCat） | base64 内联 Video：NapCat 解码到自身临时目录，零配置；上限 512MB |
+| 未配置回调 + 微信桥 | 无有效形态（桥既读不到本地路径也不解码 base64），插件直接回复失败原因并提示配置 |
 
-因此若桥接端收到的是文件而非可播放视频，默认无需额外配置：base64 内联会优先尝试。若 base64 因超过 50MB 被跳过，再考虑配置 AstrBot 全局 `callback_api_base`（形如 `http://<AstrBot主机>:<端口>`），并确保桥接端能访问该地址。插件日志会打印实际发送的组件类型（`type=Video` 或 `type=File`）与失败原因。
+**结果语义**：组件交给适配器之后，成败归桥与平台管——
 
-发送前 QQ 与微信都会先剥离部分模型输出的 MP4 顶层 C2PA `uuid` 等非必要 box（无需 ffmpeg）。可选：主机安装 `ffmpeg` 后，会再以 `-map_metadata -1` remux `+faststart` 或转码 H.264+AAC，进一步清掉 moov 元数据。若本地清洗失败则跳过 base64 内联（脏字节会被桥接端拒收），只走路径/URL/File 候选。
+- 桥返回错误 → 群里如实转述 `❌ 视频发送失败：<桥的错误原文>`，不重试、不换形态、不做任何解读；
+- 无错误 → 插件静默；
+- 仅插件自身原因（无可用形态、本地文件缺失、组件库异常）→ 群里说明 `❌ 视频未能发出（插件侧原因）：<原因>`。
+
+发送前 QQ 与微信统一做 MP4 清洗：剥离部分模型输出的顶层 C2PA `uuid` 等非必要 box（无需 ffmpeg）；可选：主机安装 `ffmpeg` 后，再以 `-map_metadata -1` remux `+faststart` 或转码 H.264+AAC，进一步提升兼容性。
 
 ## 平台判定（QQ / 微信 / 其他）
 
 QQ 与微信可能同时挂在同一个 aiocqhttp 适配器下，且 AstrBot 平台实例名可随时修改。插件按以下顺序判定发送链路：
 
 1. **配置钉住机器人账号（推荐）**：在插件配置的 `platform` 段填写
-   - `qq_self_ids`：QQ 机器人的 `self_id`（QQ 号）。命中则走 QQ 链路，额外优先注册回调 URL 候选。
-   - `wechat_self_ids`：微信机器人的 `self_id`（wxid 或微信号）。命中则走微信/其他链路（同一条清洗 + base64/URL 视频链）。
+   - `qq_self_ids`：QQ 机器人的 `self_id`（QQ 号）。命中则走 QQ 链路。
+   - `wechat_self_ids`：微信机器人的 `self_id`（wxid 或微信号）。命中则走微信/其他链路。
    - 判定优先级：`qq_self_ids` > `wechat_self_ids` > 启发式。
 2. **启发式兜底（未配置时）**：
    - id 含 `wxid_` / `@chatroom` / `gh_` / `wechat` / `weixin` / `微信` → 微信链路
    - 适配器为 `aiocqhttp` / `onebot` 或 UMO 以 `qq:` 开头 → QQ 链路
-   - 其他适配器 → 其他链路（同微信链路）
+   - 其他适配器 → 其他链路
 
 日志中的 `platform=qq|wechat|other` 即为判定结果，便于核对。
 
