@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .recallloom/
+.recallloom.*/
 .serena/
 _recallloom_prepare/
 main.py.bak_*

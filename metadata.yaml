@@ -1,7 +1,7 @@
 name: astrbot_plugin_video_generation
 display_name: 通用视频生成
 desc: 面向 AstrBot 的通用视频生成插件，支持 Seedance、可灵、Sora 等主流模型（OpenAI 风格 / 统一媒体视频接口网关），自动识别秒数与比例，支持文生视频、图生视频与预设提示词
-version: v0.5.1
+version: v0.5.2
 author: 沐倾
 repo: https://github.com/muqing-kg/astrbot_plugin_video_generation
 astrbot_version: ">=4.25.3"

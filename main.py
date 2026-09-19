@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import re
 import time
 from datetime import datetime
@@ -30,6 +29,7 @@ from .core.generation.presets import combine_prompt, match_presets, parse_preset
 from .core.generation.prompt import build_enhanced_video_prompt
 from .core.generation.reference import collect_event_images, detect_image_aspect_ratio
 from .core.shared.logging import log_prefix, safe_log_text
+from .core.shared.sendplan import build_video_candidates
 from .core.shared.types import VideoRequest
 from .core.tasks.ids import new_task_id
 from .core.tasks.manager import TaskManager
@@ -42,11 +42,9 @@ LOG = log_prefix("Plugin")
     "astrbot_plugin_video_generation",
     "沐倾",
     "通用视频生成插件",
-    "v0.5.1",
+    "v0.5.2",
 )
 class VideoGenerationPlugin(Star):
-    _QQ_BASE64_VIDEO_MAX_BYTES = 50 * 1024 * 1024
-
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.context = context
@@ -276,99 +274,17 @@ class VideoGenerationPlugin(Star):
     def _is_qq_platform(self, event: AstrMessageEvent) -> bool:
         return self._platform_kind(event) == "qq"
 
-    def _build_generic_video_candidates(self, comp: Any, path_obj: Path) -> list[Any]:
-        """Keep the original non-QQ candidate chain intact."""
-        candidates: list[Any] = []
-        for cls_name in ("Video", "File", "Record"):
-            cls = getattr(comp, cls_name, None)
-            if cls is None:
-                continue
-            for kwargs in (
-                {"file": str(path_obj)},
-                {"path": str(path_obj)},
-                {"url": str(path_obj)},
-            ):
-                try:
-                    candidates.append(cls(**kwargs))
-                    break
-                except Exception:
-                    continue
-            for builder_name in ("fromFileSystem", "from_file", "from_path"):
-                builder = getattr(cls, builder_name, None)
-                if not callable(builder):
-                    continue
-                try:
-                    candidates.append(builder(str(path_obj)))
-                    break
-                except TypeError:
-                    for kw in ({"file": str(path_obj)}, {"path": str(path_obj)}):
-                        try:
-                            candidates.append(builder(**kw))
-                            break
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-        return candidates
-
-    def _build_qq_video_candidates(
-        self, comp: Any, path_obj: Path, result_url: str, allow_base64: bool = True
+    def _build_video_candidates(
+        self, comp: Any, path_obj: Path, result_url: str, *, allow_inline: bool
     ) -> list[Any]:
-        """Build QQ playable-video candidates only. File is appended by the sender.
-
-        Notes on AstrBot v4.27.2 + aiocqhttp + NapCat:
-        - Image/Record are auto-converted to base64 by the platform adapter.
-        - Video is NOT; Video.to_dict() either keeps self.file as-is, or registers it
-          through callback_api_base. base64:// + callback_api_base raises FileNotFoundError.
-        - Comp.Video => OneBot type=video (playable bubble)
-        - Comp.File  => OneBot type=file (download card)
-        - NapCat uriToLocalFile() accepts base64://, file:///, absolute paths, http(s);
-          base64:// is decoded into NapCat's own temp dir, so it works without
-          callback_api_base and without a NapCat-visible filesystem.
-        """
-        candidates: list[Any] = []
-        abs_path = str(path_obj.resolve(strict=False))
-        video_cls = getattr(comp, "Video", None)
-        if video_cls is None:
-            return candidates
-
-        def try_append(builder) -> None:
-            try:
-                candidates.append(builder())
-            except Exception as exc:
-                logger.warning(
-                    f"{LOG} 构造 Video 候选失败: {safe_log_text(exc, 160)}"
-                )
-
-        # base64:// inline payload: best when AstrBot and NapCat do not share FS.
-        # Must run after _prepare_qq_playable_mp4 (C2PA uuid stripped); raw model MP4
-        # with C2PA credentials still fails NT EventChecker. Skipped when callback_api_base is set
-        # (Video.to_dict() would treat base64:// as a path and raise FileNotFoundError).
-        if allow_base64 and not self._callback_api_base_configured():
-            try:
-                size = path_obj.stat().st_size
-                if 0 < size <= self._QQ_BASE64_VIDEO_MAX_BYTES:
-                    bs64 = base64.b64encode(path_obj.read_bytes()).decode("ascii")
-                    try_append(lambda: video_cls.fromBase64(bs64))
-            except Exception as exc:
-                logger.warning(
-                    f"{LOG} 构造 base64 Video 候选失败: {safe_log_text(exc, 160)}"
-                )
-
-        # Official / most compatible: local file URI via fromFileSystem.
-        if callable(getattr(video_cls, "fromFileSystem", None)):
-            try_append(lambda: video_cls.fromFileSystem(abs_path))
-
-        # Absolute path form (FileTokenService accepts real paths).
-        try_append(lambda: video_cls(file=abs_path, path=abs_path))
-
-        # Public URL only if truly http(s). Grok gateway content URLs need Bearer and
-        # usually cannot be fetched anonymously by NapCat.
-        if result_url and result_url.startswith(("http://", "https://")):
-            if callable(getattr(video_cls, "fromURL", None)):
-                try_append(lambda: video_cls.fromURL(result_url))
-
-        return candidates
+        """Ordered components that each carry the video itself (no image/voice proxy)."""
+        return build_video_candidates(
+            comp,
+            path_obj,
+            result_url,
+            callback_configured=self._callback_api_base_configured(),
+            allow_inline=allow_inline,
+        )
 
     @staticmethod
     def _callback_api_base_configured() -> bool:
@@ -532,12 +448,13 @@ class VideoGenerationPlugin(Star):
         dst.write_bytes(out)
         return dst, removed
 
-    async def _prepare_qq_playable_mp4(self, path_obj: Path) -> tuple[Path, bool]:
-        """Local mp4 -> QQ-playable local mp4 (separate temp files, never in-place).
+    async def _prepare_playable_mp4(self, path_obj: Path) -> tuple[Path, bool]:
+        """Local mp4 -> bridge-playable local mp4 (separate temp files, never in-place).
 
-        Only used by the QQ branch. WeChat keeps the original downloaded file.
-        Returns (send_path, sanitized_ok); sanitized_ok=False when local cleaning
-        failed, in which case callers should avoid raw-base64 Video candidates.
+        Used by BOTH the QQ and WeChat branches: bridges reject model MP4s with
+        C2PA uuid boxes / fat metadata regardless of platform. Returns
+        (send_path, sanitized_ok); sanitized_ok=False when local cleaning failed,
+        in which case callers should avoid raw-base64 Video candidates.
 
         Steps:
         1) sanitize to `*_qqstrip.mp4` (C2PA uuid -> same-size free; no ffmpeg)
@@ -557,12 +474,12 @@ class VideoGenerationPlugin(Star):
             stripped_path, removed = self._sanitize_mp4_for_qq(path_obj, strip_path)
             if removed:
                 logger.info(
-                    f"{LOG} QQ 视频已清洗本地文件: {stripped_path.name} removed={','.join(removed)}"
+                    f"{LOG} 视频本地清洗: {stripped_path.name} removed={','.join(removed)}"
                 )
                 work_path = stripped_path
         except Exception as exc:
             sanitized_ok = False
-            logger.warning(f"{LOG} QQ 视频本地清洗失败: {safe_log_text(exc, 120)}")
+            logger.warning(f"{LOG} 视频本地清洗失败: {safe_log_text(exc, 120)}")
 
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
@@ -607,7 +524,7 @@ class VideoGenerationPlugin(Star):
         ]
         ok, err = await asyncio.to_thread(_run_ffmpeg, remux_cmd, 120)
         if ok:
-            logger.info(f"{LOG} QQ 视频已 remux 为可播放文件: {play_path.name}")
+            logger.info(f"{LOG} 视频已 remux 为可播放文件: {play_path.name}")
             return play_path, True
         if err:
             logger.warning(f"{LOG} ffmpeg remux 失败: {safe_log_text(err, 200)}")
@@ -637,7 +554,7 @@ class VideoGenerationPlugin(Star):
         ]
         ok, err = await asyncio.to_thread(_run_ffmpeg, encode_cmd, 300)
         if ok:
-            logger.info(f"{LOG} QQ 视频已转码为可播放文件: {play_path.name}")
+            logger.info(f"{LOG} 视频已转码为可播放文件: {play_path.name}")
             return play_path, True
         if err:
             logger.warning(f"{LOG} ffmpeg 转码失败: {safe_log_text(err, 200)}")
@@ -671,24 +588,18 @@ class VideoGenerationPlugin(Star):
 
                 is_qq = self._is_qq_platform(event)
                 plain_cls = getattr(Comp, "Plain", None)
-                # Two separate pipelines:
-                # - QQ: local download -> sanitize/convert -> Video card candidates
-                # - WeChat/others: original local mp4 only (do NOT run QQ convert)
-                send_path = path_obj
-                qq_sanitized_ok = True
-                if is_qq:
-                    send_path, qq_sanitized_ok = await self._prepare_qq_playable_mp4(path_obj)
-
-                candidates = (
-                    self._build_qq_video_candidates(
-                        Comp, send_path, result_url, allow_base64=qq_sanitized_ok
-                    )
-                    if is_qq
-                    else self._build_generic_video_candidates(Comp, path_obj)
+                # Both platforms get the same MP4 hygiene: C2PA uuid / fat metadata
+                # make bridges answer 内容无效 regardless of platform.
+                send_path, sanitized_ok = await self._prepare_playable_mp4(path_obj)
+                candidates = self._build_video_candidates(
+                    Comp, send_path, result_url, allow_inline=sanitized_ok
                 )
 
                 # QQ: prefer callback HTTP URL for Video when available. This avoids
                 # base64:// + callback_api_base FileNotFoundError and helps remote NapCat.
+                # WeChat needs no pre-registration: Video.to_dict() auto-registers local
+                # files when callback_api_base is set, and inline base64 is skipped in
+                # that case, so the bridge always receives bytes or a fetchable URL.
                 if is_qq:
                     callback_url = await self._register_video_callback_url(send_path)
                     video_cls = getattr(Comp, "Video", None)
@@ -700,19 +611,6 @@ class VideoGenerationPlugin(Star):
                                 errors.append(
                                     f"VideoCallback:{safe_log_text(exc, 120)}"
                                 )
-
-                    # File only as the final fallback for QQ.
-                    file_cls = getattr(Comp, "File", None)
-                    if file_cls is not None:
-                        try:
-                            candidates.append(
-                                file_cls(
-                                    name=send_path.name,
-                                    file=str(send_path.resolve(strict=False)),
-                                )
-                            )
-                        except Exception:
-                            pass
 
                 for component in candidates:
                     try:
@@ -737,9 +635,9 @@ class VideoGenerationPlugin(Star):
                                 MessageChain(chain=chain_list),
                             )
                         comp_type = type(component).__name__
-                        if is_qq and comp_type == "File":
+                        if comp_type == "File":
                             logger.warning(
-                                f"{LOG} QQ 仅以 File 附件发送成功（非可播放视频气泡）: path={send_path.name} "
+                                f"{LOG} 仅以 File 附件送达（非可播放视频气泡）: path={send_path.name} "
                                 f"errors={'; '.join(errors) if errors else 'none'}"
                             )
                         else:
@@ -758,23 +656,6 @@ class VideoGenerationPlugin(Star):
             except Exception as exc:
                 errors.append(f"CompImport:{safe_log_text(exc, 120)}")
                 logger.warning(f"{LOG} 组件发送初始化失败: {safe_log_text(exc, 160)}")
-
-            for method_name in ("video", "file", "file_image"):
-                try:
-                    chain = MessageChain()
-                    method = getattr(chain, method_name, None)
-                    if not callable(method):
-                        continue
-                    method(str(path_obj))
-                    if info:
-                        chain.message("\n" + info)
-                    await self.context.send_message(event.unified_msg_origin, chain)
-                    logger.info(
-                        f"{LOG} 已通过 MessageChain.{method_name} 发送本地视频: {path_obj.name}"
-                    )
-                    return True
-                except Exception as exc:
-                    errors.append(f"{method_name}:{safe_log_text(exc, 120)}")
 
         if result_url:
             text_msg = f"✅ 视频已生成\n{result_url}"
