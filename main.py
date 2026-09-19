@@ -41,7 +41,7 @@ LOG = log_prefix("Plugin")
     "astrbot_plugin_video_generation",
     "沐倾",
     "通用视频生成插件",
-    "v0.5.3",
+    "v0.5.4",
 )
 class VideoGenerationPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -593,8 +593,15 @@ class VideoGenerationPlugin(Star):
                     MessageChain(chain=chain_list),
                 )
         except Exception as exc:
-            # 交付后桥返回了错误：如实转述一次，不重试、不换形态、不解读
             reason = safe_log_text(str(exc), 200)
+            if self._is_bridge_ack_timeout(exc):
+                # 桥只是回报它等回执等超了（实测视频已送达），不是发送失败结论：
+                # 是否送达归桥与平台管，仅记日志，不向群里报告
+                logger.warning(
+                    f"{LOG} 桥等待回执超时（非失败结论，不报告）: form={form} "
+                    f"platform={self._platform_kind(event)} err={reason}"
+                )
+                return True
             logger.warning(
                 f"{LOG} 桥返回错误: form={form} platform={self._platform_kind(event)} err={reason}"
             )
@@ -606,6 +613,13 @@ class VideoGenerationPlugin(Star):
             f"platform={self._platform_kind(event)}"
         )
         return True
+
+    @staticmethod
+    def _is_bridge_ack_timeout(exc: Exception) -> bool:
+        """NapCat retcode=1200 / NT sendMsg 回执等待超时：实测消息已送达，
+        不属于发送失败结论。其余桥返回的错误均视为明确失败照常报告。"""
+        text = str(exc)
+        return "retcode=1200" in text or "Timeout: NTEvent" in text
 
     def _maybe_delete_local_video(self, result_path: str) -> None:
         """Delete local temp video after successful send when enabled."""
